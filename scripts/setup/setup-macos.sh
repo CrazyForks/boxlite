@@ -98,7 +98,22 @@ install_dtc() {
     echo ""
 }
 
-# Install llvm (includes lld linker and libclang) - required for cross-compiling init binary and bindgen
+# Install lld (LLVM linker) - required for cross-compiling init binary
+install_lld() {
+    print_step "Checking for lld... "
+    if command_exists lld; then
+        print_success "Found"
+    elif brew_installed "lld"; then
+        print_success "Already installed (brew)"
+    else
+        echo -e "${YELLOW}Installing...${NC}"
+        brew install lld
+        print_success "lld installed"
+    fi
+    echo ""
+}
+
+# Install llvm (libclang) - required for bindgen
 install_llvm() {
     print_step "Checking for llvm... "
 
@@ -184,6 +199,8 @@ main() {
     install_musl_cross
 
     install_dtc
+
+    install_lld
 
     install_llvm
 

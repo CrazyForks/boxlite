@@ -438,12 +438,14 @@ fn apply_libkrun_patch(src_dir: &Path, manifest_dir: &Path) {
     fs::write(&patch_marker, "applied").ok();
 }
 
-/// Sets up LLVM environment if llvm-config is not in PATH.
-/// - Adds llvm/bin to PATH (for lld linker used in cross-compilation)
-/// - Sets LIBCLANG_PATH (for bindgen to find libclang)
+/// Sets LIBCLANG_PATH for bindgen if not already set.
+/// This is needed when llvm is installed via brew but not linked (keg-only).
 #[cfg(target_os = "macos")]
-fn setup_llvm_env() {
-    // Skip if llvm-config is already in PATH
+fn setup_libclang_path() {
+    // Skip if LIBCLANG_PATH already set or llvm-config is in PATH
+    if env::var("LIBCLANG_PATH").is_ok() {
+        return;
+    }
     if Command::new("llvm-config")
         .arg("--version")
         .stdout(Stdio::null())
@@ -451,48 +453,18 @@ fn setup_llvm_env() {
         .status()
         .is_ok_and(|s| s.success())
     {
-        println!("cargo:warning=llvm-config found in PATH, skipping LLVM setup");
         return;
     }
-
-    println!("cargo:warning=llvm-config not in PATH, trying to find brew's llvm...");
 
     // Try to find brew's llvm
     if let Ok(output) = Command::new("brew").args(["--prefix", "llvm"]).output() {
         if output.status.success() {
             let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("cargo:warning=Found brew llvm at: {}", prefix);
-            let bin_path = format!("{}/bin", prefix);
             let lib_path = format!("{}/lib", prefix);
-
-            // Add llvm/bin to PATH for lld
-            if Path::new(&bin_path).join("lld").exists() {
-                if let Ok(current_path) = env::var("PATH") {
-                    let new_path = format!("{}:{}", bin_path, current_path);
-                    println!("cargo:warning=Adding {} to PATH", bin_path);
-                    env::set_var("PATH", &new_path);
-                } else {
-                    env::set_var("PATH", &bin_path);
-                }
-            } else {
-                println!("cargo:warning=lld not found at {}/lld", bin_path);
-            }
-
-            // Set LIBCLANG_PATH for bindgen
-            if env::var("LIBCLANG_PATH").is_err()
-                && Path::new(&lib_path).join("libclang.dylib").exists()
-            {
-                println!("cargo:warning=Setting LIBCLANG_PATH={}", lib_path);
+            if Path::new(&lib_path).join("libclang.dylib").exists() {
                 env::set_var("LIBCLANG_PATH", &lib_path);
             }
-        } else {
-            println!(
-                "cargo:warning=brew --prefix llvm failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
         }
-    } else {
-        println!("cargo:warning=Failed to run brew command");
     }
 }
 
@@ -504,18 +476,11 @@ fn build_libkrun_macos(
     libkrunfw_install: &Path,
     manifest_dir: &Path,
 ) {
-    // Setup LLVM environment (PATH for lld, LIBCLANG_PATH for bindgen)
-    setup_llvm_env();
+    // Setup LIBCLANG_PATH for bindgen if needed
+    setup_libclang_path();
 
     // Apply cross-compilation patch from vendored patch file
     apply_libkrun_patch(src_dir, manifest_dir);
-
-    // Remove Cargo.lock to force cargo to regenerate with only needed dependencies
-    // The upstream Cargo.lock includes optional deps like krun_display (gpu) that we don't need
-    let cargo_lock = src_dir.join("Cargo.lock");
-    if cargo_lock.exists() {
-        let _ = fs::remove_file(&cargo_lock);
-    }
 
     // Build with common helper using shared build environment
     build_with_make(
@@ -632,13 +597,6 @@ fn build() {
 
     // Build libkrun with shared build environment
     let libkrun_install = out_dir.join("libkrun");
-
-    // Remove Cargo.lock to force cargo to regenerate with only needed dependencies
-    // The upstream Cargo.lock includes optional deps like krun_display (gpu) that we don't need
-    let cargo_lock = libkrun_src.join("Cargo.lock");
-    if cargo_lock.exists() {
-        let _ = std::fs::remove_file(&cargo_lock);
-    }
 
     build_with_make(
         &libkrun_src,
