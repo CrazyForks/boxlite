@@ -86,19 +86,16 @@ dist\:python:
 		python3 -m venv .venv; \
 	fi
 
-	echo "📦 Installing cibuildwheel..."; \
-	. .venv/bin/activate && pip install -q cibuildwheel; \
+	@echo "📦 Installing cibuildwheel..."
+	@. .venv/bin/activate && pip install -q cibuildwheel
 
 	@if [ "$$(uname)" = "Darwin" ]; then \
-  		source .venv/bin/activate; \
-  		cibuildwheel --only cp314-macosx_arm64 sdks/python; \
-	    cibuildwheel --platform linux sdks/python; \
-	    # CIBW_CONTAINER_ENGINE="docker; create_args: --cpus=10 --memory=16g" CIBW_DEBUG_KEEP_CONTAINER=1 cibuildwheel --platform linux sdks/python; \
+		source .venv/bin/activate; \
+		cibuildwheel --only cp314-macosx_arm64 sdks/python; \
 	elif [ "$$(uname)" = "Linux" ]; then \
-  		source .venv/bin/activate; \
-	    bash $(SCRIPT_DIR)/build/build-guest.sh; \
-	    cibuildwheel --platform linux sdks/python; \
-	    # CIBW_CONTAINER_ENGINE="docker; create_args: --cpus=10 --memory=16g" CIBW_DEBUG_KEEP_CONTAINER=1 cibuildwheel --platform linux sdks/python; \
+		source .venv/bin/activate; \
+		bash $(SCRIPT_DIR)/build/build-guest.sh; \
+		cibuildwheel --platform linux sdks/python; \
 	else \
 		echo "❌ Unsupported platform: $$(uname)"; \
 		exit 1; \
