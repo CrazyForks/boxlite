@@ -34,19 +34,14 @@ jobs:
         run: |
           make setup guest
 
-          # Free disk space for container build while preserving guest cargo cache
-          # Container will run `make runtime` which finds cached guest build
+          # Cache only the final binary (11MB), not entire target dir (2.3GB)
+          # Guest is not rebuilt in container (SKIP_GUEST_BUILD=1), so no incremental compilation needed
           GUEST_TARGET=$(scripts/util.sh --target)
+          mkdir -p ".cache/$GUEST_TARGET/release"
+          cp "target/$GUEST_TARGET/release/boxlite-guest" ".cache/$GUEST_TARGET/release/"
 
-          # Preserve guest target cache (for incremental compilation in container)
-          # Remove other targets and host artifacts to save space
-          if [ -d "target" ]; then
-              # Keep guest target, delete everything else in target/
-              find target -mindepth 1 -maxdepth 1 ! -name "$GUEST_TARGET" -exec rm -rf {} +
-          fi
-
-          # Remove rustup/cargo (container will reinstall)
-          rm -rf ~/.rustup ~/.cargo
+          # Clean up to save disk space
+          rm -rf target ~/.rustup ~/.cargo
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.2.0
