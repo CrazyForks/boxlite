@@ -84,6 +84,9 @@ pub enum Commands {
     /// Copy files/folders between host and box
     Cp(crate::commands::cp::CpArgs),
 
+    /// Display system-wide runtime information
+    Info(crate::commands::info::InfoArgs),
+
     /// Generate shell completion script (hidden from help)
     #[command(hide = true)]
     Completion(CompletionArgs),
@@ -141,20 +144,18 @@ pub struct GlobalFlags {
 }
 
 impl GlobalFlags {
-    pub fn create_runtime(&self) -> anyhow::Result<BoxliteRuntime> {
-        // Load config file if provided, otherwise use default options
+    /// Resolve runtime options from config file and CLI overrides (--home, --registry).
+    pub fn resolve_runtime_options(&self) -> anyhow::Result<BoxliteOptions> {
         let mut options = if let Some(config_path) = &self.config {
             crate::config::load_config(Path::new(config_path))?
         } else {
             BoxliteOptions::default()
         };
 
-        // CLI --home override home_dir
         if let Some(cli_home) = &self.home {
             options.home_dir = cli_home.clone();
         }
 
-        // CLI --registry prepends to image_registries (highest priority)
         if !self.registry.is_empty() {
             options.image_registries = self
                 .registry
@@ -164,7 +165,20 @@ impl GlobalFlags {
                 .collect();
         }
 
+        Ok(options)
+    }
+
+    /// Create a runtime from pre-resolved options (avoids resolving twice when caller already has options).
+    pub fn create_runtime_with_options(
+        &self,
+        options: BoxliteOptions,
+    ) -> anyhow::Result<BoxliteRuntime> {
         BoxliteRuntime::new(options).map_err(Into::into)
+    }
+
+    pub fn create_runtime(&self) -> anyhow::Result<BoxliteRuntime> {
+        let options = self.resolve_runtime_options()?;
+        self.create_runtime_with_options(options)
     }
 }
 
