@@ -91,6 +91,20 @@ jobs:
           # Clean up to save disk space
           rm -rf target ~/.rustup ~/.cargo
 
+      # Cache cargo registry for manylinux container.
+      # Swatinem/rust-cache can't run inside Docker, so we use actions/cache
+      # with CARGO_HOME redirected to a host-mounted path.
+      - name: Cache manylinux cargo registry
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cargo-manylinux/registry
+            .cargo-manylinux/git
+          key: manylinux-cargo-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            manylinux-cargo-${{ matrix.target }}-
+
       - name: Build Node.js package (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -106,6 +120,7 @@ jobs:
           fi
 
           export SKIP_GUEST_BUILD=1
+          export PATH="$CARGO_HOME/bin:$PATH"
           make setup runtime
 
           export PATH="$HOME/.cargo/bin:$PATH"
@@ -120,6 +135,7 @@ jobs:
             -v ${{ github.workspace }}:/work \
             -v "$RUNNER_TEMP/build.sh:/tmp/build.sh:ro" \
             -w /work \
+            -e CARGO_HOME=/work/.cargo-manylinux \
             quay.io/pypa/manylinux_2_28_${{ contains(matrix.target, 'arm64') && 'aarch64' || 'x86_64' }} \
             bash /tmp/build.sh
 
