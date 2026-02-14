@@ -15,7 +15,7 @@ pip install boxlite
 **Verify Installation:**
 ```python
 python3 -c "import boxlite; print(boxlite.__version__)"
-# Output: 0.4.4
+# Output: installed boxlite package version
 ```
 
 ## Basic Execution
