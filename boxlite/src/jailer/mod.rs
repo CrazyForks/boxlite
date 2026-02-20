@@ -641,14 +641,13 @@ mod tests {
         std::fs::write(&base_disk, vec![0u8; 1024 * 1024]).unwrap();
 
         let layout = test_layout(box_dir);
-        let child_disk = Qcow2Helper::new()
-            .create_cow_child_disk(
-                &base_disk,
-                BackingFormat::Raw,
-                &layout.disk_path(),
-                16 * 1024 * 1024,
-            )
-            .unwrap();
+        let child_disk = Qcow2Helper::create_cow_child_disk(
+            &base_disk,
+            BackingFormat::Raw,
+            &layout.disk_path(),
+            16 * 1024 * 1024,
+        )
+        .unwrap();
 
         let paths = build_path_access(&layout, &[]);
 

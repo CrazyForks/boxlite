@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use parking_lot::RwLock;
 use tar;
@@ -100,6 +101,9 @@ pub(crate) struct BoxImpl {
     /// Cancellation token for this box (child of runtime's token).
     /// When cancelled (via stop() or runtime shutdown), all operations abort gracefully.
     pub(crate) shutdown_token: CancellationToken,
+    /// Serializes disk-mutating snapshot/clone/export operations.
+    /// Prevents concurrent disk mutations (rename, delete, flatten) from racing.
+    pub(crate) disk_ops: tokio::sync::Mutex<()>,
 
     // --- Lazily initialized ---
     live: OnceCell<LiveState>,
@@ -130,6 +134,7 @@ impl BoxImpl {
             state: RwLock::new(state),
             runtime,
             shutdown_token,
+            disk_ops: tokio::sync::Mutex::new(()),
             live: OnceCell::new(),
         }
     }
@@ -162,6 +167,8 @@ impl BoxImpl {
     ///
     /// This is idempotent - calling start() on a Running box is a no-op.
     pub(crate) async fn start(&self) -> BoxliteResult<()> {
+        let t0 = Instant::now();
+
         // Check if already shutdown (via stop() or runtime shutdown)
         if self.shutdown_token.is_cancelled() {
             return Err(BoxliteError::Stopped(
@@ -188,6 +195,11 @@ impl BoxImpl {
         // Trigger lazy initialization (this does the actual work)
         let _ = self.live_state().await?;
 
+        tracing::info!(
+            box_id = %self.config.id,
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "Box started"
+        );
         Ok(())
     }
 
@@ -282,6 +294,8 @@ impl BoxImpl {
     }
 
     pub(crate) async fn stop(&self) -> BoxliteResult<()> {
+        let t0 = Instant::now();
+
         // Early exit if already stopped (idempotent, prevents double-counting)
         // Note: We check status, not shutdown_token, because the token may be cancelled
         // by runtime.shutdown() before stop() is called on each box.
@@ -362,7 +376,11 @@ impl BoxImpl {
         self.runtime
             .invalidate_box_impl(self.id(), self.config.name.as_deref());
 
-        tracing::info!("Stopped box {}", self.id());
+        tracing::info!(
+            box_id = %self.config.id,
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "Box stopped"
+        );
 
         // Increment runtime-wide stopped counter
         self.runtime
@@ -395,6 +413,8 @@ impl BoxImpl {
         container_dst: &str,
         opts: CopyOptions,
     ) -> BoxliteResult<()> {
+        let t0 = Instant::now();
+
         // Check if box is stopped before proceeding
         if self.shutdown_token.is_cancelled() {
             return Err(BoxliteError::Stopped(
@@ -435,6 +455,14 @@ impl BoxImpl {
             .await?;
 
         let _ = tokio::fs::remove_file(&temp_tar).await;
+
+        tracing::info!(
+            box_id = %self.config.id,
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            src = %host_src.display(),
+            dst = container_dst,
+            "copy_into completed"
+        );
         Ok(())
     }
 
@@ -444,6 +472,8 @@ impl BoxImpl {
         host_dst: &std::path::Path,
         opts: CopyOptions,
     ) -> BoxliteResult<()> {
+        let t0 = Instant::now();
+
         // Check if box is stopped before proceeding
         if self.shutdown_token.is_cancelled() {
             return Err(BoxliteError::Stopped(
@@ -477,6 +507,14 @@ impl BoxImpl {
 
         extract_tar_to_host(&temp_tar, host_dst, opts.overwrite)?;
         let _ = tokio::fs::remove_file(&temp_tar).await;
+
+        tracing::info!(
+            box_id = %self.config.id,
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            src = container_src,
+            dst = %host_dst.display(),
+            "copy_out completed"
+        );
         Ok(())
     }
 
@@ -579,6 +617,482 @@ impl BoxImpl {
 }
 
 // ============================================================================
+// QUIESCE / THAW (QEMU+libvirt style bracket pattern)
+// ============================================================================
+
+impl BoxImpl {
+    /// Execute a future with the VM quiesced for point-in-time consistency.
+    ///
+    /// Follows the QEMU+libvirt quiesce protocol:
+    ///   1. Guest Quiesce RPC (FIFREEZE — flush dirty pages + block new writes)
+    ///   2. SIGSTOP shim process (pause vCPUs)
+    ///   3. `fut` — caller's operation (disk copy, export, etc.)
+    ///   4. SIGCONT shim process (resume vCPUs)
+    ///   5. Guest Thaw RPC (FITHAW — unblock writes)
+    ///
+    /// If the VM is not running, `fut` is executed directly with no quiesce.
+    /// Guest RPCs are best-effort with timeout — failure degrades to
+    /// crash-consistent (SIGSTOP-only), not operation failure.
+    pub(crate) async fn with_quiesce_async<Fut, R>(&self, fut: Fut) -> BoxliteResult<R>
+    where
+        Fut: std::future::Future<Output = BoxliteResult<R>>,
+    {
+        let (pid, was_running) = {
+            let state = self.state.read();
+            let running = state.status.is_running();
+            let pid = if running {
+                state.pid.map(|p| p as i32)
+            } else {
+                None
+            };
+            (pid, running)
+        };
+
+        let Some(pid) = pid else {
+            if was_running {
+                return Err(BoxliteError::Internal(
+                    "Box is running but has no PID".to_string(),
+                ));
+            }
+            // Not running — execute directly, no quiesce needed.
+            return fut.await;
+        };
+
+        let t0 = Instant::now();
+
+        // Phase 1: Freeze guest I/O (best-effort, 5s timeout)
+        let t_quiesce = Instant::now();
+        let frozen = self.guest_quiesce().await;
+        let quiesce_ms = t_quiesce.elapsed().as_millis() as u64;
+
+        // Phase 2: SIGSTOP — pause vCPUs
+        // SAFETY: sending SIGSTOP to a known valid PID that we own (shim process).
+        let ret = unsafe { libc::kill(pid, libc::SIGSTOP) };
+        if ret != 0 {
+            // If SIGSTOP fails, thaw before returning error
+            if frozen {
+                self.guest_thaw().await;
+            }
+            return Err(BoxliteError::Internal(format!(
+                "Failed to SIGSTOP shim process (pid={}): {}",
+                pid,
+                std::io::Error::last_os_error()
+            )));
+        }
+        {
+            let mut state = self.state.write();
+            state.force_status(BoxStatus::Paused);
+            let _ = self.runtime.box_manager.save_box(self.id(), &state);
+        }
+
+        // Phase 3: Caller's operation
+        let t_op = Instant::now();
+        let result = fut.await;
+        let operation_ms = t_op.elapsed().as_millis() as u64;
+
+        // Phase 4: SIGCONT — resume vCPUs (always, even if f() failed)
+        // SAFETY: Always send SIGCONT — harmless ESRCH if process already dead.
+        unsafe {
+            libc::kill(pid, libc::SIGCONT);
+        }
+        // Only transition to Running if process is still alive after resume.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            let mut state = self.state.write();
+            state.force_status(BoxStatus::Running);
+            let _ = self.runtime.box_manager.save_box(self.id(), &state);
+        }
+
+        // Phase 5: Thaw guest I/O (always, best-effort)
+        let t_thaw = Instant::now();
+        if frozen {
+            self.guest_thaw().await;
+        }
+        let thaw_ms = t_thaw.elapsed().as_millis() as u64;
+
+        tracing::info!(
+            box_id = %self.id(),
+            total_ms = t0.elapsed().as_millis() as u64,
+            quiesce_ms,
+            operation_ms,
+            thaw_ms,
+            frozen,
+            "Quiesce bracket completed"
+        );
+
+        result
+    }
+
+    /// Best-effort guest filesystem quiesce (FIFREEZE) with timeout.
+    /// Returns true if quiesce succeeded.
+    async fn guest_quiesce(&self) -> bool {
+        let Ok(live) = self.live_state().await else {
+            tracing::warn!("Cannot quiesce: LiveState not available");
+            return false;
+        };
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut guest = live.guest_session.guest().await?;
+            guest.quiesce().await
+        })
+        .await;
+
+        match result {
+            Ok(Ok(count)) => {
+                tracing::debug!(frozen_count = count, "Guest filesystems quiesced");
+                true
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Guest quiesce RPC failed: {}, proceeding with crash-consistent snapshot",
+                    e
+                );
+                false
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Guest quiesce timed out, proceeding with crash-consistent snapshot"
+                );
+                false
+            }
+        }
+    }
+
+    /// Best-effort guest filesystem thaw (FITHAW) with timeout.
+    async fn guest_thaw(&self) {
+        let Ok(live) = self.live_state().await else {
+            tracing::warn!("Cannot thaw: LiveState not available");
+            return;
+        };
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut guest = live.guest_session.guest().await?;
+            guest.thaw().await
+        })
+        .await;
+
+        match result {
+            Ok(Ok(count)) => {
+                tracing::debug!(thawed_count = count, "Guest filesystems thawed");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("Guest thaw RPC failed: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!("Guest thaw timed out");
+            }
+        }
+    }
+}
+
+// ============================================================================
+// CLONE / EXPORT OPERATIONS
+// ============================================================================
+
+impl BoxImpl {
+    pub(crate) async fn clone_box(
+        &self,
+        _options: crate::runtime::options::CloneOptions,
+        name: Option<String>,
+    ) -> BoxliteResult<crate::LiteBox> {
+        let t0 = Instant::now();
+        let _lock = self.disk_ops.lock().await;
+
+        let rt = Arc::clone(&self.runtime);
+        let src_home = self.config.box_home.clone();
+
+        let src_container = src_home.join(crate::disk::constants::filenames::CONTAINER_DISK);
+        let src_guest = src_home.join(crate::disk::constants::filenames::GUEST_ROOTFS_DISK);
+
+        if !src_container.exists() {
+            return Err(BoxliteError::Storage(format!(
+                "Container disk not found at {}",
+                src_container.display()
+            )));
+        }
+
+        let box_id = crate::runtime::types::BoxID::new();
+        let container_id = crate::runtime::types::ContainerID::new();
+        let now = chrono::Utc::now();
+
+        let box_home = rt.layout.boxes_dir().join(box_id.as_str());
+        let socket_path = crate::runtime::constants::filenames::unix_socket_path(
+            rt.layout.home_dir(),
+            box_id.as_str(),
+        );
+        let ready_socket_path = box_home.join("sockets").join("ready.sock");
+
+        std::fs::create_dir_all(&box_home).map_err(|e| {
+            BoxliteError::Storage(format!(
+                "Failed to create box directory {}: {}",
+                box_home.display(),
+                e
+            ))
+        })?;
+
+        // Quiesce the VM during disk copy for point-in-time consistency.
+        let dst_container = box_home.join(crate::disk::constants::filenames::CONTAINER_DISK);
+        let clone_result = self
+            .with_quiesce_async(async {
+                clone_cow(&src_container, &dst_container, &src_guest, &box_home)
+            })
+            .await;
+
+        if let Err(e) = clone_result {
+            let _ = std::fs::remove_dir_all(&box_home);
+            return Err(e);
+        }
+
+        let config = super::config::BoxConfig {
+            id: box_id.clone(),
+            name,
+            created_at: now,
+            container: super::config::ContainerRuntimeConfig { id: container_id },
+            options: self.config.options.clone(),
+            engine_kind: crate::vmm::VmmKind::Libkrun,
+            transport: boxlite_shared::Transport::unix(socket_path),
+            box_home,
+            ready_socket_path,
+        };
+
+        let mut state = crate::runtime::types::BoxState::new();
+        state.set_status(BoxStatus::Stopped);
+
+        let lock_id = rt.lock_manager.allocate()?;
+        state.set_lock_id(lock_id);
+
+        if let Err(e) = rt.box_manager.add_box(&config, &state) {
+            let _ = rt.lock_manager.free(lock_id);
+            let _ = std::fs::remove_dir_all(&config.box_home);
+            return Err(e);
+        }
+
+        tracing::info!(
+            box_id = %config.id,
+            source_id = %self.id(),
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            "Cloned box (COW)"
+        );
+
+        let litebox = rt.get(box_id.as_str()).await?.ok_or_else(|| {
+            BoxliteError::Internal("Cloned box not found after persist".to_string())
+        })?;
+
+        Ok(litebox)
+    }
+
+    pub(crate) async fn export_box(
+        &self,
+        _options: crate::runtime::options::ExportOptions,
+        dest: &std::path::Path,
+    ) -> BoxliteResult<crate::runtime::options::BoxArchive> {
+        let t0 = Instant::now();
+        let _lock = self.disk_ops.lock().await;
+
+        let box_home = self.config.box_home.clone();
+        let runtime_layout = self.runtime.layout.clone();
+
+        // Phase 1: Flatten disks inside quiesce bracket (VM paused only for this).
+        // Flatten reads live qcow2 chains and must see consistent disk state.
+        let flatten_result = self
+            .with_quiesce_async(async {
+                let bh = box_home.clone();
+                let rl = runtime_layout.clone();
+                tokio::task::spawn_blocking(move || do_export_flatten(&bh, &rl))
+                    .await
+                    .map_err(|e| {
+                        BoxliteError::Internal(format!("Export flatten task panicked: {}", e))
+                    })?
+            })
+            .await?;
+
+        // Phase 2: Checksum + manifest + archive run with VM resumed.
+        // These only read static temp files, no disk consistency needed.
+        let config_name = self.config.name.clone();
+        let config_options = self.config.options.clone();
+        let box_id_str = self.id().to_string();
+        let dest = dest.to_path_buf();
+
+        let result = tokio::task::spawn_blocking(move || {
+            do_export_finalize(
+                flatten_result,
+                config_name.as_deref(),
+                &config_options,
+                &box_id_str,
+                &dest,
+            )
+        })
+        .await
+        .map_err(|e| BoxliteError::Internal(format!("Export finalize task panicked: {}", e)))?;
+
+        tracing::info!(
+            box_id = %self.config.id,
+            elapsed_ms = t0.elapsed().as_millis() as u64,
+            ok = result.is_ok(),
+            "export_box completed"
+        );
+
+        result
+    }
+}
+
+/// Intermediate result from flatten phase, passed to finalize phase.
+struct FlattenResult {
+    temp_dir: tempfile::TempDir,
+    flat_container: std::path::PathBuf,
+    flat_guest: Option<std::path::PathBuf>,
+    flatten_ms: u64,
+}
+
+/// Phase 1: Flatten qcow2 disk chains into standalone images.
+/// Runs inside the quiesce bracket — this is the only part that needs disk consistency.
+fn do_export_flatten(
+    box_home: &std::path::Path,
+    runtime_layout: &crate::runtime::layout::FilesystemLayout,
+) -> BoxliteResult<FlattenResult> {
+    use crate::disk::Qcow2Helper;
+    use crate::disk::constants::filenames as disk_filenames;
+
+    let container_disk = box_home.join(disk_filenames::CONTAINER_DISK);
+    let guest_disk = box_home.join(disk_filenames::GUEST_ROOTFS_DISK);
+
+    if !container_disk.exists() {
+        return Err(BoxliteError::Storage(format!(
+            "Container disk not found at {}",
+            container_disk.display()
+        )));
+    }
+
+    let temp_dir = tempfile::tempdir_in(runtime_layout.temp_dir())
+        .map_err(|e| BoxliteError::Storage(format!("Failed to create temp directory: {}", e)))?;
+
+    let t_flatten = Instant::now();
+    let flat_container = temp_dir.path().join(disk_filenames::CONTAINER_DISK);
+    Qcow2Helper::flatten(&container_disk, &flat_container)?;
+
+    let flat_guest = if guest_disk.exists() {
+        let flat = temp_dir.path().join(disk_filenames::GUEST_ROOTFS_DISK);
+        Qcow2Helper::flatten(&guest_disk, &flat)?;
+        Some(flat)
+    } else {
+        None
+    };
+    let flatten_ms = t_flatten.elapsed().as_millis() as u64;
+
+    Ok(FlattenResult {
+        temp_dir,
+        flat_container,
+        flat_guest,
+        flatten_ms,
+    })
+}
+
+/// Phase 2: Checksum, manifest, and archive.
+/// Runs after the VM resumes — only reads static temp files.
+fn do_export_finalize(
+    flatten: FlattenResult,
+    config_name: Option<&str>,
+    config_options: &crate::runtime::options::BoxOptions,
+    box_id_str: &str,
+    dest: &std::path::Path,
+) -> BoxliteResult<crate::runtime::options::BoxArchive> {
+    use crate::archive::{
+        ARCHIVE_VERSION, ArchiveManifest, MANIFEST_FILENAME, build_zstd_tar_archive, sha256_file,
+    };
+
+    let output_path = if dest.is_dir() {
+        let name = config_name.unwrap_or("box");
+        dest.join(format!("{}.boxlite", name))
+    } else {
+        dest.to_path_buf()
+    };
+
+    let t_checksum = Instant::now();
+    let container_disk_checksum = sha256_file(&flatten.flat_container)?;
+    let guest_disk_checksum = match flatten.flat_guest {
+        Some(ref fg) => sha256_file(fg)?,
+        None => String::new(),
+    };
+    let checksum_ms = t_checksum.elapsed().as_millis() as u64;
+
+    let image = match &config_options.rootfs {
+        crate::runtime::options::RootfsSpec::Image(img) => img.clone(),
+        crate::runtime::options::RootfsSpec::RootfsPath(path) => path.clone(),
+    };
+
+    let manifest = ArchiveManifest {
+        version: ARCHIVE_VERSION,
+        box_name: config_name.map(|s| s.to_string()),
+        image,
+        box_options: Some(config_options.clone()),
+        guest_disk_checksum,
+        container_disk_checksum,
+        exported_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| BoxliteError::Internal(format!("Failed to serialize manifest: {}", e)))?;
+    let manifest_path = flatten.temp_dir.path().join(MANIFEST_FILENAME);
+    std::fs::write(&manifest_path, manifest_json)?;
+
+    let t_archive = Instant::now();
+    build_zstd_tar_archive(
+        &output_path,
+        &manifest_path,
+        &flatten.flat_container,
+        flatten.flat_guest.as_deref(),
+        3,
+    )?;
+    let archive_ms = t_archive.elapsed().as_millis() as u64;
+
+    tracing::info!(
+        box_id = %box_id_str,
+        output = %output_path.display(),
+        flatten_ms = flatten.flatten_ms,
+        checksum_ms,
+        archive_ms,
+        "Exported box to archive"
+    );
+
+    Ok(crate::runtime::options::BoxArchive::new(output_path))
+}
+
+fn clone_cow(
+    src_container: &std::path::Path,
+    dst_container: &std::path::Path,
+    src_guest: &std::path::Path,
+    box_home: &std::path::Path,
+) -> BoxliteResult<()> {
+    use crate::disk::constants::filenames as disk_filenames;
+    use crate::disk::{BackingFormat, Qcow2Helper};
+
+    let container_size = Qcow2Helper::qcow2_virtual_size(src_container)?;
+
+    // Leak the returned Disk handles to prevent RAII auto-cleanup.
+    // clone_cow creates persistent files that outlive this function.
+    Qcow2Helper::create_cow_child_disk(
+        src_container,
+        BackingFormat::Qcow2,
+        dst_container,
+        container_size,
+    )?
+    .leak();
+
+    if src_guest.exists() {
+        let guest_size = Qcow2Helper::qcow2_virtual_size(src_guest)?;
+        let dst_guest = box_home.join(disk_filenames::GUEST_ROOTFS_DISK);
+        Qcow2Helper::create_cow_child_disk(
+            src_guest,
+            BackingFormat::Qcow2,
+            &dst_guest,
+            guest_size,
+        )?
+        .leak();
+    }
+
+    Ok(())
+}
+
+// ============================================================================
 // BoxBackend trait implementation
 // ============================================================================
 
@@ -633,7 +1147,7 @@ impl crate::runtime::backend::BoxBackend for BoxImpl {
     async fn clone_box(
         &self,
         options: crate::runtime::options::CloneOptions,
-        name: &str,
+        name: Option<String>,
     ) -> BoxliteResult<crate::LiteBox> {
         BoxImpl::clone_box(self, options, name).await
     }
@@ -642,7 +1156,7 @@ impl crate::runtime::backend::BoxBackend for BoxImpl {
         &self,
         options: crate::runtime::options::ExportOptions,
         dest: &std::path::Path,
-    ) -> BoxliteResult<std::path::PathBuf> {
+    ) -> BoxliteResult<crate::runtime::options::BoxArchive> {
         BoxImpl::export_box(self, options, dest).await
     }
 }
