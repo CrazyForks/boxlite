@@ -258,13 +258,8 @@ jobs:
         with:
           toolchain: ${{ needs.config.outputs.rust-toolchain }}
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install system dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
+      - name: Install build dependencies
+        run: make setup:build
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -278,8 +273,5 @@ jobs:
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
             core.exportVariable('ACTIONS_CACHE_SERVICE_V2', process.env.ACTIONS_CACHE_SERVICE_V2 || '');
 
-      - name: Run Go unit tests (stub mode)
-        working-directory: sdks/go
-        env:
-          BOXLITE_DEPS_STUB: "1"
-        run: make test-stub
+      - name: Run Go unit tests
+        run: make test:unit:go
