@@ -5,7 +5,7 @@ package boxlite
 // Default CGO directives — links against prebuilt libboxlite.a in lib/.
 // Install the library first:
 //
-//	go generate github.com/boxlite-ai/boxlite/sdks/go/pkg/boxlite
+//	go generate github.com/boxlite-ai/boxlite/sdks/go
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/lib/include
@@ -15,6 +15,6 @@ package boxlite
 #cgo darwin,arm64 LDFLAGS: -framework Hypervisor -framework vmnet -lresolv
 
 #cgo linux,amd64 LDFLAGS: ${SRCDIR}/lib/linux-x64-gnu/libboxlite.a
-#cgo linux,amd64 LDFLAGS: -lresolv -lpthread -ldl -lm
+#cgo linux,amd64 LDFLAGS: -lresolv -lpthread -ldl -lrt -lm
 */
 import "C"
