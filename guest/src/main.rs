@@ -4,6 +4,8 @@
 compile_error!("BoxLite guest is Linux-only; build with a Linux target");
 
 #[cfg(target_os = "linux")]
+mod ca_trust;
+#[cfg(target_os = "linux")]
 mod container;
 #[cfg(target_os = "linux")]
 mod layout;

@@ -23,8 +23,11 @@ pub use factory::VmmFactory;
 pub use registry::create_engine;
 
 /// Available sandbox engine implementations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum VmmKind {
+    #[default]
     Libkrun,
     Firecracker,
 }
@@ -145,6 +148,9 @@ impl BlockDevices {
 /// communication channel, and additional environment variables.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct InstanceSpec {
+    /// Engine type (e.g., Libkrun). Included in config to avoid CLI args.
+    #[serde(default)]
+    pub engine: VmmKind,
     /// Unique identifier for this box instance.
     /// Used for logging, cgroup naming, and isolation identification.
     pub box_id: String,

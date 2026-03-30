@@ -82,6 +82,7 @@ extern "C" {
     /// The callback must be thread-safe and must not panic.
     /// Pass NULL to restore default stderr logging.
     pub fn gvproxy_set_log_callback(callback: *const c_void);
+
 }
 
 #[cfg(test)]

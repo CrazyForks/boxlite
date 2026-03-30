@@ -99,6 +99,11 @@ impl PipelineTask<InitCtx> for VmmSpawnTask {
         ctx.volume_mgr = Some(volume_mgr);
         ctx.rootfs_init = Some(rootfs_init);
         ctx.container_mounts = Some(container_mounts);
+        // Store CA cert PEM for Container.Init gRPC (passed as CACert proto field)
+        ctx.ca_cert_pem = instance_spec
+            .network_config
+            .as_ref()
+            .and_then(|nc| nc.ca_cert_pem.clone());
         Ok(())
     }
 
@@ -203,6 +208,7 @@ async fn build_config(
 
     // Assemble VMM instance spec
     let instance_spec = InstanceSpec {
+        engine: VmmKind::Libkrun, // only engine — will be dynamic when others are added
         // Box identification and security
         box_id: box_id.to_string(),
         security: options.advanced.security.clone(),
@@ -293,6 +299,9 @@ fn build_guest_entrypoint(
         builder.with_env(key, value);
     }
 
+    // Secret placeholder env vars are injected in container_rootfs.rs (single source of truth).
+    // The guest init process inherits them from the container environment.
+
     Ok(builder.build())
 }
 
@@ -340,6 +349,23 @@ fn build_network_config(
 
     let mut config = NetworkBackendConfig::new(final_mappings, layout.net_backend_socket_path());
     config.allow_net = allow_net;
+    config.secrets = options.secrets.clone();
+
+    // Generate ephemeral MITM CA when secrets are configured.
+    // The CA cert+key flow through NetworkBackendConfig → GvproxyConfig → Go.
+    if !options.secrets.is_empty() {
+        match crate::net::ca::load_or_generate(&layout.ca_dir()) {
+            Ok(ca) => {
+                config.ca_cert_pem = Some(ca.cert_pem);
+                config.ca_key_pem = Some(ca.key_pem);
+            }
+            Err(e) => {
+                tracing::error!("MITM: CA setup failed, secrets disabled: {e}");
+                config.secrets.clear();
+            }
+        }
+    }
+
     Some(config)
 }
 

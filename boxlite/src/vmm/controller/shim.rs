@@ -277,6 +277,7 @@ impl VmmController for ShimController {
         guest_entrypoint.env = env; // Use the modified env with RUST_LOG
 
         let serializable_config = InstanceSpec {
+            engine: self.engine_type,
             // Box identification and security (from ShimController)
             box_id: self.box_id.to_string(),
             security: self.options.advanced.security.clone(),
@@ -324,7 +325,6 @@ impl VmmController for ShimController {
         let shim_spawn_start = Instant::now();
         let spawner = ShimSpawner::new(
             &self.binary_path,
-            self.engine_type,
             &self.layout,
             self.box_id.as_str(),
             &self.options,

@@ -20,38 +20,18 @@ use std::time::{Duration, Instant};
 
 use boxlite::{
     util,
-    vmm::{self, ExitInfo, InstanceSpec, VmmConfig, VmmKind, controller::watchdog},
+    vmm::{self, ExitInfo, InstanceSpec, VmmConfig, controller::watchdog},
 };
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
-use clap::Parser;
 use crash_capture::CrashCapture;
 #[allow(unused_imports)]
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 #[cfg(feature = "gvproxy")]
-use boxlite::net::{ConnectionType, NetworkBackendEndpoint, gvproxy::GvproxyInstance};
+use boxlite::net::gvproxy::GvproxyInstance;
 
-/// Universal Box runner binary - subprocess that executes isolated Boxes
-#[derive(Parser, Debug)]
-#[command(
-    author,
-    version,
-    about = "BoxLite shim process - handles Box in isolated subprocess"
-)]
-struct ShimArgs {
-    /// Engine type to use for Box execution
-    ///
-    /// Supported engines: libkrun, firecracker
-    #[arg(long)]
-    engine: VmmKind,
-
-    /// Box configuration as JSON string
-    ///
-    /// This contains the full InstanceSpec including rootfs path, volumes,
-    /// networking, guest entrypoint, and other runtime configuration.
-    #[arg(long)]
-    config: String,
-}
+// No CLI args — all config (including engine type) is read from stdin pipe.
+// This avoids /proc/<pid>/cmdline exposure of secrets and CA keys.
 
 /// Initialize tracing with file logging.
 ///
@@ -87,13 +67,21 @@ fn main() -> BoxliteResult<()> {
     let wall = chrono::Utc::now().format("%H:%M:%S%.6f");
     eprintln!("[shim] {wall} T+0ms: main() entered");
 
-    // Parse command line arguments with clap
-    // VmmKind parsed via FromStr trait automatically
-    let args = ShimArgs::parse();
+    // Read config from stdin (piped by parent process).
+    // Stdin avoids /proc/<pid>/cmdline exposure — CLI args are world-readable
+    // on Linux, and the config contains CA private keys and secret values.
+    let config_json = {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| BoxliteError::Engine(format!("Failed to read config from stdin: {e}")))?;
+        buf
+    };
 
-    // Parse InstanceSpec from JSON
-    let config: InstanceSpec = serde_json::from_str(&args.config)
-        .map_err(|e| BoxliteError::Engine(format!("Failed to parse config JSON: {}", e)))?;
+    #[allow(unused_mut)]
+    let mut config: InstanceSpec = serde_json::from_str(&config_json)
+        .map_err(|e| BoxliteError::Engine(format!("Failed to parse config JSON: {e}")))?;
     timing("config parsed");
 
     // Initialize logging using box_dir derived from exit_file path.
@@ -112,7 +100,7 @@ fn main() -> BoxliteResult<()> {
     CrashCapture::install(config.exit_file.clone());
 
     tracing::info!(
-        engine = ?args.engine,
+        engine = ?config.engine,
         box_id = %config.box_id,
         "Box runner starting"
     );
@@ -121,7 +109,7 @@ fn main() -> BoxliteResult<()> {
     let exit_file = config.exit_file.clone();
 
     // Run the shim and handle errors
-    run_shim(args, config, timing).inspect_err(|e| {
+    run_shim(config, timing).inspect_err(|e| {
         let info = ExitInfo::Error {
             exit_code: 1,
             message: e.to_string(),
@@ -134,7 +122,7 @@ fn main() -> BoxliteResult<()> {
 }
 
 #[allow(unused_mut)]
-fn run_shim(args: ShimArgs, mut config: InstanceSpec, timing: impl Fn(&str)) -> BoxliteResult<()> {
+fn run_shim(mut config: InstanceSpec, timing: impl Fn(&str)) -> BoxliteResult<()> {
     tracing::debug!(
         shares = ?config.fs_shares.shares(),
         "Filesystem shares configured"
@@ -154,48 +142,12 @@ fn run_shim(args: ShimArgs, mut config: InstanceSpec, timing: impl Fn(&str)) -> 
     // duration of the VM. When the shim process exits, OS cleans up all resources.
     #[cfg(feature = "gvproxy")]
     if let Some(ref net_config) = config.network_config {
-        tracing::info!(
-            port_mappings = ?net_config.port_mappings,
-            "Creating network backend (gvproxy) from config"
-        );
-
-        // Create gvproxy instance with caller-provided socket path + allowlist
-        let gvproxy = GvproxyInstance::new(
-            net_config.socket_path.clone(),
-            &net_config.port_mappings,
-            net_config.allow_net.clone(),
-        )?;
+        let (gvproxy, endpoint) = GvproxyInstance::from_config(net_config)?;
+        config.network_backend_endpoint = Some(endpoint);
         timing("gvproxy created");
 
-        tracing::info!(
-            socket_path = ?net_config.socket_path,
-            "Network backend created"
-        );
-
-        // Create NetworkBackendEndpoint from socket path
-        // Platform-specific connection type:
-        // - macOS: UnixDgram with VFKit protocol
-        // - Linux: UnixStream with Qemu protocol
-        let connection_type = if cfg!(target_os = "macos") {
-            ConnectionType::UnixDgram
-        } else {
-            ConnectionType::UnixStream
-        };
-
-        // Use GUEST_MAC constant - must match DHCP static lease in gvproxy config
-        use boxlite::net::constants::GUEST_MAC;
-
-        config.network_backend_endpoint = Some(NetworkBackendEndpoint::UnixSocket {
-            path: net_config.socket_path.clone(),
-            connection_type,
-            mac_address: GUEST_MAC,
-        });
-
-        // Leak the gvproxy instance to keep it alive for VM lifetime.
-        // This is intentional - the VM needs networking for its entire life,
-        // and OS cleanup handles resources when process exits.
-        let _gvproxy_leaked = Box::leak(Box::new(gvproxy));
-        tracing::debug!("Leaked gvproxy instance for VM lifetime");
+        // Leak to keep networking alive for VM lifetime (OS cleans up on exit)
+        Box::leak(Box::new(gvproxy));
     }
 
     // Apply VMM seccomp filter with TSYNC (covers all threads including gvproxy)
@@ -237,7 +189,7 @@ fn run_shim(args: ShimArgs, mut config: InstanceSpec, timing: impl Fn(&str)) -> 
 
     // Create engine using inventory pattern (no match statement needed!)
     // Engines auto-register themselves at compile time
-    let mut engine = vmm::create_engine(args.engine, options)?;
+    let mut engine = vmm::create_engine(config.engine, options)?;
     timing("engine created");
 
     tracing::info!("Engine created, creating Box instance");

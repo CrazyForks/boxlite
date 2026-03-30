@@ -540,7 +540,7 @@ fn build_standard_mounts(bundle_path: &Path) -> BoxliteResult<Vec<Mount>> {
             })?,
     );
 
-    // Add /etc/hosts bind mount
+    // Add /etc/hosts bind mount (read-only — writable /etc/hosts allows DNS hijacking)
     let hosts_path = bundle_path.join("hosts");
     mounts.push(
         MountBuilder::default()
