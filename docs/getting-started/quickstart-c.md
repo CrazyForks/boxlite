@@ -147,7 +147,7 @@ int main() {
         "\"memory_mib\":512,"
         "\"env\":[],"
         "\"volumes\":[],"
-        "\"network\":\"Isolated\","
+        "\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},"
         "\"ports\":[]"
     "}";
 
@@ -176,6 +176,21 @@ int main() {
 ```
 
 Build and run using the same commands as above.
+
+The native JSON surface also accepts `NetworkSpec` and `secrets`, for example:
+
+```json
+{
+  "network": {"mode": "enabled", "allow_net": ["api.openai.com"]},
+  "secrets": [
+    {
+      "name": "openai",
+      "value": "sk-...",
+      "hosts": ["api.openai.com"]
+    }
+  ]
+}
+```
 
 ---
 

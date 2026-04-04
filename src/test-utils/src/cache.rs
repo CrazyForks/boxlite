@@ -7,8 +7,10 @@
 //!
 //! ```text
 //! target/boxlite-test/
+//! ├── .ready          ← cache version marker
 //! ├── images/         ← pulled OCI images (shared read-only)
 //! ├── rootfs/         ← built guest rootfs (shared read-only)
+//! ├── bases/          ← shared guest base disks (shared read-only)
 //! ├── tmp/            ← transient files (per-test subdirs)
 //! └── db/boxlite.db   ← DB snapshot (copied per-test)
 //! ```
@@ -22,6 +24,9 @@ use boxlite::runtime::options::{BoxOptions, BoxliteOptions, RootfsSpec};
 use tempfile::TempDir;
 
 use crate::{TEST_IMAGES, TEST_SHUTDOWN_TIMEOUT, test_registries};
+
+const READY_MARKER_FILE: &str = ".ready";
+const WARM_CACHE_VERSION: &str = "v3-python-alpine-bases";
 
 /// Cleanup handle for per-test resources linked into a home directory.
 ///
@@ -71,16 +76,22 @@ impl SharedResources {
         self.dir.join("db/boxlite.db")
     }
 
+    /// Path to the versioned warm-cache ready marker.
+    fn ready_marker_path(&self) -> PathBuf {
+        self.dir.join(READY_MARKER_FILE)
+    }
+
     /// Symlink shared caches into a per-test home directory and copy the DB.
     ///
     /// Creates:
     /// - `home/images → target/boxlite-test/images/` (symlink, read-only)
     /// - `home/rootfs → target/boxlite-test/rootfs/` (symlink, read-only)
+    /// - `home/bases → target/boxlite-test/bases/` (symlink, read-only)
     /// - `home/tmp → target/boxlite-test/tmp/<unique>/` (symlink, per-test)
     /// - `home/db/boxlite.db` (copy, per-test writable)
     pub fn link_into(&self, home_dir: &Path) -> LinkedCache {
-        // Symlink images, rootfs → cache dir (shared, read-only)
-        for name in ["images", "rootfs"] {
+        // Symlink images, rootfs, bases → cache dir (shared, read-only)
+        for name in ["images", "rootfs", "bases"] {
             let link = home_dir.join(name);
             if !link.exists() {
                 let target = self.dir.join(name);
@@ -120,7 +131,7 @@ impl SharedResources {
         let dir = cache_dir();
 
         // Create persistent cache directories
-        for subdir in ["images", "rootfs", "tmp"] {
+        for subdir in ["images", "rootfs", "bases", "tmp"] {
             std::fs::create_dir_all(dir.join(subdir))
                 .unwrap_or_else(|e| panic!("create cache/{subdir}: {e}"));
         }
@@ -142,10 +153,12 @@ impl SharedResources {
             return resources;
         }
 
+        resources.clear_ready_marker();
+
         // Ephemeral short-path home for warm-up runtime (macOS 104-char socket limit).
-        // Symlinks {images,rootfs,tmp} → target/boxlite-test/ so data persists.
+        // Symlinks {images,rootfs,bases,tmp} → target/boxlite-test/ so data persists.
         let warm_home = TempDir::new_in("/tmp").expect("create warm home");
-        for name in ["images", "rootfs", "tmp"] {
+        for name in ["images", "rootfs", "bases", "tmp"] {
             symlink_or_exists(&dir.join(name), &warm_home.path().join(name), name);
         }
 
@@ -154,17 +167,29 @@ impl SharedResources {
         // the same thread panics ("Cannot start a runtime from within a runtime").
         resources.warm_on_thread(warm_home.path());
         resources.snapshot_db(warm_home.path());
+        resources.mark_ready();
         // warm_home dropped here — cleaned up automatically
 
         resources
     }
 
     fn is_warm(&self) -> bool {
-        let manifests_dir = self.images_dir().join("manifests");
-        manifests_dir.exists()
-            && std::fs::read_dir(&manifests_dir)
-                .map(|d| d.count() > 0)
-                .unwrap_or(false)
+        self.db_snapshot().exists() && self.ready_marker_matches()
+    }
+
+    fn ready_marker_matches(&self) -> bool {
+        std::fs::read_to_string(self.ready_marker_path())
+            .map(|contents| contents.trim() == WARM_CACHE_VERSION)
+            .unwrap_or(false)
+    }
+
+    fn clear_ready_marker(&self) {
+        let _ = std::fs::remove_file(self.ready_marker_path());
+    }
+
+    fn mark_ready(&self) {
+        std::fs::write(self.ready_marker_path(), format!("{WARM_CACHE_VERSION}\n"))
+            .expect("write cache ready marker");
     }
 
     fn warm_on_thread(&self, warm_home: &Path) {
@@ -294,7 +319,7 @@ mod tests {
     fn linked_cache_cleans_per_test_tmp_on_drop() {
         let base = tempfile::tempdir().expect("create base temp dir");
         let cache_dir = base.path().join("cache");
-        for sub in ["images", "rootfs", "tmp"] {
+        for sub in ["images", "rootfs", "bases", "tmp"] {
             std::fs::create_dir_all(cache_dir.join(sub)).unwrap();
         }
 
@@ -327,7 +352,7 @@ mod tests {
     fn link_into_creates_tmp_symlink() {
         let base = tempfile::tempdir().expect("create base temp dir");
         let cache_dir = base.path().join("cache");
-        for sub in ["images", "rootfs", "tmp"] {
+        for sub in ["images", "rootfs", "bases", "tmp"] {
             std::fs::create_dir_all(cache_dir.join(sub)).unwrap();
         }
 
@@ -348,6 +373,80 @@ mod tests {
         assert!(
             tmp_link.exists(),
             "symlink target should exist while LinkedCache is alive"
+        );
+    }
+
+    #[test]
+    fn link_into_creates_bases_symlink() {
+        let base = tempfile::tempdir().expect("create base temp dir");
+        let cache_dir = base.path().join("cache");
+        for sub in ["images", "rootfs", "bases", "tmp"] {
+            std::fs::create_dir_all(cache_dir.join(sub)).unwrap();
+        }
+
+        let resources = SharedResources { dir: cache_dir };
+
+        let home = tempfile::tempdir().expect("create home temp dir");
+        let _linked = resources.link_into(home.path());
+
+        let bases_link = home.path().join("bases");
+        assert!(
+            bases_link
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "home/bases should be a symlink"
+        );
+        assert!(
+            bases_link.exists(),
+            "bases symlink target should exist while LinkedCache is alive"
+        );
+    }
+
+    #[test]
+    fn is_warm_requires_ready_marker_and_db_snapshot() {
+        let base = tempfile::tempdir().expect("create base temp dir");
+        let cache_dir = base.path().join("cache");
+        std::fs::create_dir_all(cache_dir.join("db")).unwrap();
+
+        let resources = SharedResources { dir: cache_dir };
+
+        assert!(!resources.is_warm(), "missing marker and DB should be cold");
+
+        std::fs::write(
+            resources.ready_marker_path(),
+            format!("{WARM_CACHE_VERSION}\n"),
+        )
+        .unwrap();
+        assert!(
+            !resources.is_warm(),
+            "marker alone should not make the cache warm"
+        );
+
+        std::fs::write(resources.db_snapshot(), "").unwrap();
+        assert!(resources.is_warm(), "marker plus DB should be warm");
+    }
+
+    #[test]
+    fn is_warm_rejects_stale_marker_versions() {
+        let base = tempfile::tempdir().expect("create base temp dir");
+        let cache_dir = base.path().join("cache");
+        std::fs::create_dir_all(cache_dir.join("db")).unwrap();
+
+        let resources = SharedResources { dir: cache_dir };
+
+        std::fs::write(resources.db_snapshot(), "").unwrap();
+        std::fs::write(resources.ready_marker_path(), "v1\n").unwrap();
+        assert!(
+            !resources.is_warm(),
+            "stale cache marker versions must trigger re-warm"
+        );
+
+        resources.mark_ready();
+        assert!(
+            resources.is_warm(),
+            "current cache marker version should be accepted"
         );
     }
 }

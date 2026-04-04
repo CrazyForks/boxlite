@@ -1,24 +1,28 @@
 package boxlite
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Wire types match the JSON format produced by the Rust FFI layer.
 // These are unexported — only used for JSON marshaling/unmarshaling.
 
 // boxOptionsWire matches Rust BoxOptions JSON format.
 type boxOptionsWire struct {
-	Rootfs     any         `json:"rootfs"`
-	CPUs       *int        `json:"cpus,omitempty"`
-	MemoryMiB  *int        `json:"memory_mib,omitempty"`
-	Env        [][2]string `json:"env"`
-	Volumes    []wireVol   `json:"volumes"`
-	Network    string      `json:"network"`
-	Ports      []wirePort  `json:"ports"`
-	WorkDir    string      `json:"working_dir,omitempty"`
-	AutoRemove *bool       `json:"auto_remove,omitempty"`
-	Detach     *bool       `json:"detach,omitempty"`
-	Entrypoint []string    `json:"entrypoint,omitempty"`
-	Cmd        []string    `json:"cmd,omitempty"`
+	Rootfs     any          `json:"rootfs"`
+	CPUs       *int         `json:"cpus,omitempty"`
+	MemoryMiB  *int         `json:"memory_mib,omitempty"`
+	Env        [][2]string  `json:"env"`
+	Volumes    []wireVol    `json:"volumes"`
+	Network    any          `json:"network"`
+	Ports      []wirePort   `json:"ports"`
+	WorkDir    string       `json:"working_dir,omitempty"`
+	AutoRemove *bool        `json:"auto_remove,omitempty"`
+	Detach     *bool        `json:"detach,omitempty"`
+	Entrypoint []string     `json:"entrypoint,omitempty"`
+	Cmd        []string     `json:"cmd,omitempty"`
+	Secrets    []wireSecret `json:"secrets"`
 }
 
 type wireVol struct {
@@ -31,6 +35,18 @@ type wirePort struct {
 	HostPort  *int   `json:"host_port,omitempty"`
 	GuestPort int    `json:"guest_port"`
 	Protocol  string `json:"protocol"`
+}
+
+type wireNetworkSpec struct {
+	Mode     string   `json:"mode"`
+	AllowNet []string `json:"allow_net,omitempty"`
+}
+
+type wireSecret struct {
+	Name        string   `json:"name"`
+	Hosts       []string `json:"hosts"`
+	Placeholder string   `json:"placeholder"`
+	Value       string   `json:"value"`
 }
 
 // wireRootfsImage matches Rust RootfsSpec::Image serialization.
@@ -74,11 +90,10 @@ func (w *boxInfoWire) toBoxInfo() BoxInfo {
 }
 
 // buildOptionsJSON creates the JSON wire representation from boxConfig.
-func buildOptionsJSON(image string, cfg *boxConfig) boxOptionsWire {
+func buildOptionsJSON(image string, cfg *boxConfig) (boxOptionsWire, error) {
 	w := boxOptionsWire{
-		Rootfs:  wireRootfsImage{Image: image},
-		Env:     cfg.env,
-		Network: "Isolated",
+		Rootfs: wireRootfsImage{Image: image},
+		Env:    cfg.env,
 	}
 
 	if w.Env == nil {
@@ -107,6 +122,38 @@ func buildOptionsJSON(image string, cfg *boxConfig) boxOptionsWire {
 		w.Cmd = cfg.cmd
 	}
 
+	network := NetworkSpec{
+		Mode: NetworkModeEnabled,
+	}
+	if cfg.network != nil {
+		network = *cfg.network
+	}
+	allowNet := network.AllowNet
+	if allowNet == nil {
+		allowNet = []string{}
+	}
+	switch network.Mode {
+	case "", NetworkModeEnabled:
+		w.Network = wireNetworkSpec{
+			Mode:     string(NetworkModeEnabled),
+			AllowNet: allowNet,
+		}
+	case NetworkModeDisabled:
+		if len(allowNet) > 0 {
+			return boxOptionsWire{}, fmt.Errorf(
+				"network.mode=%q is incompatible with allow_net", NetworkModeDisabled,
+			)
+		}
+		w.Network = wireNetworkSpec{Mode: string(NetworkModeDisabled)}
+	default:
+		return boxOptionsWire{}, fmt.Errorf(
+			"invalid network mode %q: expected %q or %q",
+			network.Mode,
+			NetworkModeEnabled,
+			NetworkModeDisabled,
+		)
+	}
+
 	for _, v := range cfg.volumes {
 		w.Volumes = append(w.Volumes, wireVol{
 			HostPath:  v.hostPath,
@@ -121,6 +168,25 @@ func buildOptionsJSON(image string, cfg *boxConfig) boxOptionsWire {
 	if w.Ports == nil {
 		w.Ports = []wirePort{}
 	}
+	for _, secret := range cfg.secrets {
+		placeholder := secret.Placeholder
+		if placeholder == "" {
+			placeholder = "<BOXLITE_SECRET:" + secret.Name + ">"
+		}
+		hosts := secret.Hosts
+		if hosts == nil {
+			hosts = []string{}
+		}
+		w.Secrets = append(w.Secrets, wireSecret{
+			Name:        secret.Name,
+			Hosts:       hosts,
+			Placeholder: placeholder,
+			Value:       secret.Value,
+		})
+	}
+	if w.Secrets == nil {
+		w.Secrets = []wireSecret{}
+	}
 
-	return w
+	return w, nil
 }

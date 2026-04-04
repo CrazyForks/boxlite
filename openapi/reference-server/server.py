@@ -40,7 +40,7 @@ import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import jwt
 import uvicorn
@@ -56,7 +56,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
 import boxlite
@@ -97,7 +97,31 @@ class ErrorResponse(BaseModel):
     error: ErrorModel
 
 
+class SecretSpec(BaseModel):
+    name: str
+    value: str
+    hosts: list[str] = Field(default_factory=list)
+    placeholder: Optional[str] = None
+
+
+class NetworkSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["enabled", "disabled"]
+    allow_net: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_allow_net(self) -> "NetworkSpec":
+        if self.mode == "disabled" and self.allow_net:
+            raise ValueError(
+                'network.allow_net is incompatible with network.mode="disabled"'
+            )
+        return self
+
+
 class CreateBoxRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: Optional[str] = None
     image: Optional[str] = "alpine:latest"
     rootfs_path: Optional[str] = None
@@ -111,7 +135,8 @@ class CreateBoxRequest(BaseModel):
     user: Optional[str] = None
     volumes: Optional[list[dict]] = None
     ports: Optional[list[dict]] = None
-    network: Optional[str] = "isolated"
+    network: Optional[NetworkSpec] = None
+    secrets: Optional[list[SecretSpec]] = None
     auto_remove: Optional[bool] = True
     detach: Optional[bool] = False
     security: Optional[str] = None
@@ -335,12 +360,27 @@ def build_box_options(req: CreateBoxRequest) -> boxlite.BoxOptions:
         kwargs["working_dir"] = req.working_dir
     if req.env:
         kwargs["env"] = list(req.env.items())
+    if req.network is not None:
+        kwargs["network"] = boxlite.NetworkSpec(
+            mode=req.network.mode,
+            allow_net=req.network.allow_net,
+        )
     if req.entrypoint is not None:
         kwargs["entrypoint"] = req.entrypoint
     if req.cmd is not None:
         kwargs["cmd"] = req.cmd
     if req.user is not None:
         kwargs["user"] = req.user
+    if req.secrets:
+        kwargs["secrets"] = [
+            boxlite.Secret(
+                name=secret.name,
+                value=secret.value,
+                hosts=secret.hosts,
+                placeholder=secret.placeholder,
+            )
+            for secret in req.secrets
+        ]
     if req.auto_remove is not None:
         kwargs["auto_remove"] = req.auto_remove
     if req.detach is not None:

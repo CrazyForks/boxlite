@@ -21,6 +21,26 @@ func WithRegistries(registries ...string) RuntimeOption {
 // BoxOption configures a Box.
 type BoxOption func(*boxConfig)
 
+type NetworkMode string
+
+const (
+	NetworkModeEnabled  NetworkMode = "enabled"
+	NetworkModeDisabled NetworkMode = "disabled"
+)
+
+type NetworkSpec struct {
+	Mode     NetworkMode
+	AllowNet []string
+}
+
+// Secret configures outbound HTTPS secret substitution.
+type Secret struct {
+	Name        string
+	Value       string
+	Hosts       []string
+	Placeholder string
+}
+
 type boxConfig struct {
 	name       string
 	cpus       int
@@ -32,6 +52,8 @@ type boxConfig struct {
 	cmd        []string
 	autoRemove *bool
 	detach     *bool
+	network    *NetworkSpec
+	secrets    []Secret
 }
 
 type volumeEntry struct {
@@ -89,6 +111,24 @@ func WithEntrypoint(args ...string) BoxOption {
 // WithCmd overrides the image's CMD.
 func WithCmd(args ...string) BoxOption {
 	return func(c *boxConfig) { c.cmd = args }
+}
+
+// WithNetwork sets the structured network configuration for the box.
+func WithNetwork(spec NetworkSpec) BoxOption {
+	return func(c *boxConfig) {
+		allowNet := append([]string(nil), spec.AllowNet...)
+		c.network = &NetworkSpec{
+			Mode:     spec.Mode,
+			AllowNet: allowNet,
+		}
+	}
+}
+
+// WithSecret adds an outbound HTTPS secret substitution rule.
+func WithSecret(secret Secret) BoxOption {
+	return func(c *boxConfig) {
+		c.secrets = append(c.secrets, secret)
+	}
 }
 
 // WithAutoRemove sets whether the box is auto-removed on stop.

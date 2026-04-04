@@ -5,7 +5,8 @@ use boxlite::BoxliteRestOptions;
 use boxlite::runtime::advanced_options::{AdvancedBoxOptions, HealthCheckOptions, SecurityOptions};
 use boxlite::runtime::constants::images;
 use boxlite::runtime::options::{
-    BoxOptions, BoxliteOptions, NetworkSpec, PortProtocol, PortSpec, RootfsSpec, VolumeSpec,
+    BoxOptions, BoxliteOptions, NetworkConfig, NetworkMode, NetworkSpec, PortProtocol, PortSpec,
+    RootfsSpec, Secret, VolumeSpec,
 };
 use napi_derive::napi;
 
@@ -107,8 +108,8 @@ pub struct JsBoxOptions {
     /// Volume mounts as array of volume specs
     pub volumes: Option<Vec<JsVolumeSpec>>,
 
-    /// Network mode: "enabled" (default, full access) or "disabled" (no network)
-    pub network: Option<String>,
+    /// Structured network configuration.
+    pub network: Option<JsNetworkSpec>,
 
     /// Port mappings as array of port specs
     pub ports: Option<Vec<JsPortSpec>>,
@@ -142,6 +143,9 @@ pub struct JsBoxOptions {
     /// Health check options for the box.
     #[napi(js_name = "healthCheck")]
     pub health_check: Option<JsHealthCheckOptions>,
+
+    /// Secrets to inject into outbound HTTPS requests via MITM proxy.
+    pub secrets: Option<Vec<JsSecret>>,
 }
 
 /// Environment variable specification.
@@ -200,6 +204,35 @@ pub struct JsPortSpec {
     pub host_ip: Option<String>,
 }
 
+/// Secret substitution configuration.
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct JsSecret {
+    /// Human-readable name for the secret.
+    pub name: String,
+
+    /// The real secret value. Never enters the guest.
+    pub value: String,
+
+    /// Hostnames where the secret should be injected.
+    pub hosts: Option<Vec<String>>,
+
+    /// Placeholder string visible to the guest.
+    pub placeholder: Option<String>,
+}
+
+/// Structured network configuration.
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct JsNetworkSpec {
+    /// Network mode: "enabled" or "disabled".
+    pub mode: String,
+
+    /// Outbound allowlist when network is enabled.
+    #[napi(js_name = "allowNet")]
+    pub allow_net: Option<Vec<String>>,
+}
+
 impl From<JsPortSpec> for PortSpec {
     fn from(p: JsPortSpec) -> Self {
         let protocol = match p.protocol.as_deref() {
@@ -216,8 +249,22 @@ impl From<JsPortSpec> for PortSpec {
     }
 }
 
-impl From<JsBoxOptions> for BoxOptions {
-    fn from(js_opts: JsBoxOptions) -> Self {
+impl TryFrom<JsNetworkSpec> for NetworkSpec {
+    type Error = boxlite_shared::errors::BoxliteError;
+
+    fn try_from(js_spec: JsNetworkSpec) -> Result<Self, Self::Error> {
+        let mode = js_spec.mode.parse::<NetworkMode>()?;
+        NetworkSpec::try_from(NetworkConfig {
+            mode,
+            allow_net: js_spec.allow_net.unwrap_or_default(),
+        })
+    }
+}
+
+impl TryFrom<JsBoxOptions> for BoxOptions {
+    type Error = boxlite_shared::errors::BoxliteError;
+
+    fn try_from(js_opts: JsBoxOptions) -> Result<Self, Self::Error> {
         // Convert volumes
         let volumes = js_opts
             .volumes
@@ -227,9 +274,9 @@ impl From<JsBoxOptions> for BoxOptions {
             .collect();
 
         // Convert network spec
-        let network = match js_opts.network.as_deref() {
-            Some(s) if s.eq_ignore_ascii_case("disabled") => NetworkSpec::Disabled,
-            _ => NetworkSpec::default(),
+        let network = match js_opts.network {
+            Some(spec) => NetworkSpec::try_from(spec)?,
+            None => NetworkSpec::default(),
         };
 
         // Convert ports
@@ -266,8 +313,21 @@ impl From<JsBoxOptions> for BoxOptions {
             .unwrap_or_default();
 
         let health_check = js_opts.health_check.map(HealthCheckOptions::from);
+        let secrets = js_opts
+            .secrets
+            .unwrap_or_default()
+            .into_iter()
+            .map(|secret| Secret {
+                placeholder: secret
+                    .placeholder
+                    .unwrap_or_else(|| format!("<BOXLITE_SECRET:{}>", secret.name)),
+                name: secret.name,
+                value: secret.value,
+                hosts: secret.hosts.unwrap_or_default(),
+            })
+            .collect();
 
-        BoxOptions {
+        Ok(BoxOptions {
             cpus: js_opts.cpus,
             memory_mib: js_opts.memory_mib,
             disk_size_gb: js_opts.disk_size_gb.map(|v| v as u64),
@@ -287,8 +347,8 @@ impl From<JsBoxOptions> for BoxOptions {
             entrypoint: js_opts.entrypoint,
             cmd: js_opts.cmd,
             user: js_opts.user,
-            secrets: vec![], // Secret substitution not yet supported in Node.js SDK
-        }
+            secrets,
+        })
     }
 }
 
@@ -350,5 +410,86 @@ mod tests {
         assert!(opts.client_id.is_none());
         assert!(opts.client_secret.is_none());
         assert!(opts.prefix.is_none());
+    }
+
+    #[test]
+    fn box_options_from_js_allow_net() {
+        let js = JsBoxOptions {
+            image: Some("alpine:latest".into()),
+            rootfs_path: None,
+            cpus: None,
+            memory_mib: None,
+            disk_size_gb: None,
+            working_dir: None,
+            env: None,
+            volumes: None,
+            network: Some(JsNetworkSpec {
+                mode: "enabled".into(),
+                allow_net: Some(vec!["example.com".into(), "*.openai.com".into()]),
+            }),
+            ports: None,
+            auto_remove: None,
+            detach: None,
+            entrypoint: None,
+            cmd: None,
+            user: None,
+            security: None,
+            health_check: None,
+            secrets: None,
+        };
+
+        let opts = BoxOptions::try_from(js).unwrap();
+        match opts.network {
+            NetworkSpec::Enabled { allow_net } => {
+                assert_eq!(allow_net, vec!["example.com", "*.openai.com"]);
+            }
+            NetworkSpec::Disabled => panic!("network should be enabled"),
+        }
+    }
+
+    #[test]
+    fn box_options_from_js_secrets_default_placeholder() {
+        let js = JsBoxOptions {
+            image: Some("python:slim".into()),
+            rootfs_path: None,
+            cpus: None,
+            memory_mib: None,
+            disk_size_gb: None,
+            working_dir: None,
+            env: None,
+            volumes: None,
+            network: None,
+            ports: None,
+            auto_remove: None,
+            detach: None,
+            entrypoint: None,
+            cmd: None,
+            user: None,
+            security: None,
+            health_check: None,
+            secrets: Some(vec![JsSecret {
+                name: "openai".into(),
+                value: "sk-test".into(),
+                hosts: Some(vec!["api.openai.com".into()]),
+                placeholder: None,
+            }]),
+        };
+
+        let opts = BoxOptions::try_from(js).unwrap();
+        assert_eq!(opts.secrets.len(), 1);
+        assert_eq!(opts.secrets[0].name, "openai");
+        assert_eq!(opts.secrets[0].hosts, vec!["api.openai.com"]);
+        assert_eq!(opts.secrets[0].placeholder, "<BOXLITE_SECRET:openai>");
+    }
+
+    #[test]
+    fn disabled_network_rejects_allow_net() {
+        let err = NetworkSpec::try_from(JsNetworkSpec {
+            mode: "disabled".into(),
+            allow_net: Some(vec!["example.com".into()]),
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("network.mode=\"disabled\""));
     }
 }

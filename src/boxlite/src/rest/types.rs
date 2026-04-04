@@ -89,11 +89,15 @@ pub(crate) struct CreateBoxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<CreateBoxNetworkSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cmd: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<Vec<CreateBoxSecret>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_remove: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +124,12 @@ impl CreateBoxRequest {
             Some(options.env.iter().cloned().collect())
         };
 
+        let secrets = if options.secrets.is_empty() {
+            None
+        } else {
+            Some(options.secrets.iter().map(CreateBoxSecret::from).collect())
+        };
+
         Self {
             name,
             image,
@@ -129,12 +139,55 @@ impl CreateBoxRequest {
             disk_size_gb: options.disk_size_gb,
             working_dir: options.working_dir.clone(),
             env,
+            network: Some(CreateBoxNetworkSpec::from(&options.network)),
             entrypoint: options.entrypoint.clone(),
             cmd: options.cmd.clone(),
             user: options.user.clone(),
+            secrets,
             auto_remove: Some(options.auto_remove),
             detach: Some(options.detach),
             security: None, // TODO: map security preset
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateBoxNetworkSpec {
+    pub mode: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub allow_net: Vec<String>,
+}
+
+impl From<&crate::runtime::options::NetworkSpec> for CreateBoxNetworkSpec {
+    fn from(spec: &crate::runtime::options::NetworkSpec) -> Self {
+        let config = crate::runtime::options::NetworkConfig::from(spec);
+        let mode = match config.mode {
+            crate::runtime::options::NetworkMode::Enabled => "enabled",
+            crate::runtime::options::NetworkMode::Disabled => "disabled",
+        };
+        Self {
+            mode: mode.to_string(),
+            allow_net: config.allow_net,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct CreateBoxSecret {
+    pub name: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+    pub placeholder: String,
+}
+
+impl From<&crate::runtime::options::Secret> for CreateBoxSecret {
+    fn from(secret: &crate::runtime::options::Secret) -> Self {
+        Self {
+            name: secret.name.clone(),
+            value: secret.value.clone(),
+            hosts: secret.hosts.clone(),
+            placeholder: secret.placeholder.clone(),
         }
     }
 }
@@ -396,9 +449,19 @@ mod tests {
             disk_size_gb: None,
             working_dir: None,
             env: None,
+            network: Some(CreateBoxNetworkSpec {
+                mode: "enabled".into(),
+                allow_net: vec!["api.openai.com".into()],
+            }),
             entrypoint: None,
             cmd: None,
             user: None,
+            secrets: Some(vec![CreateBoxSecret {
+                name: "openai".into(),
+                value: "sk-test".into(),
+                hosts: vec!["api.openai.com".into()],
+                placeholder: "<BOXLITE_SECRET:openai>".into(),
+            }]),
             auto_remove: Some(true),
             detach: None,
             security: None,
@@ -407,6 +470,10 @@ mod tests {
         assert!(json.contains("\"name\":\"mybox\""));
         assert!(json.contains("\"image\":\"python:3.11\""));
         assert!(json.contains("\"cpus\":2"));
+        assert!(
+            json.contains("\"network\":{\"mode\":\"enabled\",\"allow_net\":[\"api.openai.com\"]}")
+        );
+        assert!(json.contains("\"secrets\""));
         // None fields should be skipped
         assert!(!json.contains("rootfs_path"));
         assert!(!json.contains("disk_size_gb"));
@@ -414,12 +481,21 @@ mod tests {
 
     #[test]
     fn test_create_box_request_from_options() {
-        use crate::runtime::options::{BoxOptions, RootfsSpec};
+        use crate::runtime::options::{BoxOptions, NetworkSpec, RootfsSpec, Secret};
 
         let opts = BoxOptions {
             rootfs: RootfsSpec::Image("alpine:latest".into()),
             cpus: Some(4),
             memory_mib: Some(1024),
+            network: NetworkSpec::Enabled {
+                allow_net: vec!["api.openai.com".into()],
+            },
+            secrets: vec![Secret {
+                name: "openai".into(),
+                value: "sk-test".into(),
+                hosts: vec!["api.openai.com".into()],
+                placeholder: "<BOXLITE_SECRET:openai>".into(),
+            }],
             ..Default::default()
         };
         let req = CreateBoxRequest::from_options(&opts, Some("test-box".into()));
@@ -428,6 +504,37 @@ mod tests {
         assert!(req.rootfs_path.is_none());
         assert_eq!(req.cpus, Some(4));
         assert_eq!(req.memory_mib, Some(1024));
+        assert_eq!(
+            req.network.as_ref().map(|n| n.mode.as_str()),
+            Some("enabled")
+        );
+        assert_eq!(
+            req.network.as_ref().map(|n| n.allow_net.clone()),
+            Some(vec!["api.openai.com".into()])
+        );
+        assert_eq!(req.secrets.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            req.secrets.as_ref().unwrap()[0].placeholder,
+            "<BOXLITE_SECRET:openai>"
+        );
+    }
+
+    #[test]
+    fn test_create_box_request_from_options_disabled_network() {
+        use crate::runtime::options::{BoxOptions, NetworkSpec, RootfsSpec};
+
+        let opts = BoxOptions {
+            rootfs: RootfsSpec::Image("alpine:latest".into()),
+            network: NetworkSpec::Disabled,
+            ..Default::default()
+        };
+
+        let req = CreateBoxRequest::from_options(&opts, None);
+        assert_eq!(
+            req.network.as_ref().map(|n| n.mode.as_str()),
+            Some("disabled")
+        );
+        assert!(req.network.as_ref().unwrap().allow_net.is_empty());
     }
 
     #[test]

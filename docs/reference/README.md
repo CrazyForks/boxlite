@@ -114,6 +114,49 @@ image="gcr.io/project/image:tag"
 - Layer-level caching for fast subsequent starts
 - Authentication: Use registry-specific auth (Docker credentials, etc.)
 
+#### `network`
+
+Structured network configuration for outbound connectivity.
+
+**Default:** omitted, which behaves like:
+
+```json
+{
+  "mode": "enabled",
+  "allow_net": []
+}
+```
+
+**Shape:**
+- `mode`: `"enabled"` or `"disabled"`
+- `allow_net`: optional outbound allowlist used only when `mode="enabled"`
+
+**Notes:**
+- `"enabled"` gives the guest outbound connectivity.
+- `"disabled"` removes the guest network interface entirely.
+- Empty or omitted `allow_net` means full outbound access.
+
+**Supported patterns:**
+- Exact hostname: `"api.openai.com"`
+- Wildcard hostname: `"*.example.com"`
+- Exact IP: `"192.168.1.10"`
+- CIDR range: `"10.0.0.0/8"`
+
+#### `secrets`
+
+Host-side secret substitution rules for outbound HTTP(S) requests.
+
+**Shape:**
+- `name`: human-readable secret name
+- `value`: real secret value
+- `hosts`: matching hosts for substitution
+- `placeholder`: optional guest-visible token, defaults to `<BOXLITE_SECRET:{name}>`
+
+**Notes:**
+- The guest sees only the placeholder, never the real secret value.
+- The placeholder is also exposed as `BOXLITE_SECRET_<NAME>` inside the guest.
+- C SDK users pass the same structure through the raw JSON `options_json` surface.
+
 #### `cpus: int`
 
 Number of CPU cores allocated to the box.

@@ -134,6 +134,7 @@ pub enum BoxStatus {
 
 /// Configuration for creating a new box.
 #[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CreateBoxRequest {
     #[serde(default)]
     pub name: Option<String>,
@@ -162,13 +163,35 @@ pub struct CreateBoxRequest {
     #[serde(default)]
     pub ports: Option<Vec<PortSpec>>,
     #[serde(default)]
-    pub network: Option<String>,
+    pub network: Option<NetworkSpec>,
+    #[serde(default)]
+    pub secrets: Option<Vec<SecretSpec>>,
     #[serde(default)]
     pub auto_remove: Option<bool>,
     #[serde(default)]
     pub detach: Option<bool>,
     #[serde(default)]
     pub security: Option<SecurityPreset>,
+}
+
+/// Network configuration for box creation.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkSpec {
+    pub mode: String,
+    #[serde(default)]
+    pub allow_net: Vec<String>,
+}
+
+/// Secret substitution rule for outbound HTTP(S) requests.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct SecretSpec {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
 }
 
 /// Host-to-guest filesystem mount.
@@ -652,7 +675,15 @@ mod tests {
             "user": "1000:1000",
             "volumes": [{"host_path": "/tmp", "guest_path": "/mnt", "read_only": true}],
             "ports": [{"guest_port": 8080, "protocol": "tcp"}],
-            "network": "enabled",
+            "network": {
+                "mode": "enabled",
+                "allow_net": ["api.openai.com"]
+            },
+            "secrets": [{
+                "name": "openai",
+                "value": "sk-test",
+                "hosts": ["api.openai.com"]
+            }],
             "auto_remove": false,
             "detach": true,
             "security": "maximum"
@@ -663,6 +694,13 @@ mod tests {
         assert_eq!(req.volumes.as_ref().unwrap().len(), 1);
         assert!(req.volumes.as_ref().unwrap()[0].read_only);
         assert_eq!(req.ports.as_ref().unwrap()[0].guest_port, 8080);
+        assert_eq!(req.network.as_ref().unwrap().mode, "enabled");
+        assert_eq!(
+            req.network.as_ref().unwrap().allow_net,
+            vec!["api.openai.com".to_string()]
+        );
+        assert_eq!(req.secrets.as_ref().map(Vec::len), Some(1));
+        assert_eq!(req.secrets.as_ref().unwrap()[0].name, "openai");
         assert!(matches!(req.security, Some(SecurityPreset::Maximum)));
     }
 
@@ -675,9 +713,21 @@ mod tests {
         assert!(req.memory_mib.is_none());
         assert!(req.volumes.is_none());
         assert!(req.ports.is_none());
+        assert!(req.network.is_none());
+        assert!(req.secrets.is_none());
         assert!(req.security.is_none());
         assert!(req.auto_remove.is_none());
         assert!(req.detach.is_none());
+    }
+
+    #[test]
+    fn test_create_box_request_rejects_legacy_allow_net() {
+        let input = json!({
+            "network": "enabled",
+            "allow_net": ["api.openai.com"]
+        });
+        let err = serde_json::from_value::<CreateBoxRequest>(input).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[test]

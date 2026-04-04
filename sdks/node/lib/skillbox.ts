@@ -5,7 +5,12 @@
  */
 
 import * as net from "node:net";
-import { SimpleBox, type SimpleBoxOptions } from "./simplebox.js";
+import {
+  SimpleBox,
+  type NetworkSpec,
+  type Secret,
+  type SimpleBoxOptions,
+} from "./simplebox.js";
 import { TimeoutError } from "./errors.js";
 import {
   SKILLBOX_IMAGE,
@@ -47,6 +52,10 @@ export interface SkillBoxOptions {
   guiHttpsPort?: number;
   /** Remove box when stopped (default: true) */
   autoRemove?: boolean;
+  /** Structured network configuration. */
+  network?: NetworkSpec;
+  /** Secrets to inject into outbound HTTPS requests. */
+  secrets?: Secret[];
   /** Optional runtime instance */
   runtime?: Boxlite;
 }
@@ -143,6 +152,8 @@ export class SkillBox extends SimpleBox {
       diskSizeGb: options.diskSizeGb ?? SKILLBOX_DISK_SIZE_GB,
       name: options.name ?? "skill-box",
       autoRemove: options.autoRemove ?? true,
+      network: options.network,
+      secrets: options.secrets,
       runtime: options.runtime,
       env: {
         CLAUDE_CODE_OAUTH_TOKEN: oauthToken,

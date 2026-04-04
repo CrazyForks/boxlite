@@ -211,7 +211,7 @@ int main() {
     // Create box with JSON configuration
     const char* options = "{"
         "\"rootfs\":{\"Image\":\"alpine:3.19\"},"
-        "\"env\":[],\"volumes\":[],\"network\":\"Isolated\",\"ports\":[]"
+        "\"env\":[],\"volumes\":[],\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},\"ports\":[]"
     "}";
 
     if (boxlite_create_box(runtime, options, &box, &error) != Ok) {
@@ -220,6 +220,10 @@ int main() {
         boxlite_runtime_free(runtime);
         return 1;
     }
+
+    // The raw JSON surface also accepts NetworkSpec and secrets:
+    // "\"network\":{\"mode\":\"enabled\",\"allow_net\":[\"api.openai.com\"]},"
+    // "\"secrets\":[{\"name\":\"openai\",\"value\":\"sk-...\",\"hosts\":[\"api.openai.com\"]}]"
 
     // Execute command with streaming output
     int exit_code = 0;

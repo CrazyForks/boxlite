@@ -1479,11 +1479,14 @@ components:
           items:
             $ref: "#/components/schemas/PortSpec"
         network:
-          type: string
+          $ref: "#/components/schemas/NetworkSpec"
+        secrets:
+          type: array
+          items:
+            $ref: "#/components/schemas/SecretSpec"
           description: |
-            Network mode. Supported: `enabled` (full access, default), `disabled` (no network).
-            When enabled, use `allow_net` to restrict outbound traffic.
-          default: enabled
+            Secret placeholder rules for outbound HTTP(S) requests.
+            Matching requests replace `placeholder` with `value` on the host side.
         auto_remove:
           type: boolean
           description: Automatically remove box when stopped
@@ -1510,6 +1513,26 @@ components:
           type: boolean
           default: false
 
+    NetworkSpec:
+      type: object
+      description: Structured network configuration for the box
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [enabled, disabled]
+          description: |
+            `enabled` allows guest networking. `disabled` removes the guest network interface.
+        allow_net:
+          type: array
+          items:
+            type: string
+          description: |
+            Optional outbound allowlist used only when `mode=enabled`.
+            Empty or omitted means full outbound access.
+            Supports hostnames, wildcard hostnames, IPs, and CIDRs.
+
     PortSpec:
       type: object
       description: Port forwarding rule (host → guest)
@@ -1532,6 +1555,28 @@ components:
         host_ip:
           type: string
           description: Host IP to bind (defaults to 0.0.0.0)
+
+    SecretSpec:
+      type: object
+      description: Outbound HTTP(S) secret substitution rule
+      required: [name, value]
+      properties:
+        name:
+          type: string
+          description: Human-readable secret name
+        value:
+          type: string
+          description: Real secret value. Never enters the guest VM.
+        hosts:
+          type: array
+          items:
+            type: string
+          description: Matching hosts for this secret. Empty means no host restriction.
+        placeholder:
+          type: string
+          description: |
+            Placeholder string visible inside the guest.
+            Defaults to `<BOXLITE_SECRET:{name}>` when omitted.
 
     SecurityPreset:
       type: string

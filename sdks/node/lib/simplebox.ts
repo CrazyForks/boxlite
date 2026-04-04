@@ -60,6 +60,34 @@ export interface SecurityOptions {
   closeFds?: boolean;
 }
 
+/**
+ * Secret substitution rule for outbound HTTPS requests.
+ */
+export interface Secret {
+  /** Human-readable name for the secret. */
+  name: string;
+
+  /** Real secret value. Never enters the guest VM. */
+  value: string;
+
+  /** Matching hosts for secret substitution. */
+  hosts?: string[];
+
+  /** Placeholder exposed to guest code. */
+  placeholder?: string;
+}
+
+/**
+ * Structured network configuration for a box.
+ */
+export interface NetworkSpec {
+  /** Network mode. */
+  mode: "enabled" | "disabled";
+
+  /** Outbound allowlist when network is enabled. */
+  allowNet?: string[];
+}
+
 const MAX_SAFE_U64_NUMBER = Number.MAX_SAFE_INTEGER;
 
 function normalizeU64Limit(
@@ -180,6 +208,12 @@ export interface SimpleBoxOptions {
     protocol?: string;
   }>;
 
+  /** Structured network configuration. */
+  network?: NetworkSpec;
+
+  /** Secrets to inject into outbound HTTPS requests. */
+  secrets?: Secret[];
+
   /**
    * Override image ENTRYPOINT directive.
    *
@@ -283,6 +317,22 @@ export class SimpleBox {
   constructor(options: SimpleBoxOptions = {}) {
     const JsBoxlite = getJsBoxlite();
     const security = normalizeSecurityOptions(options.security);
+    const legacyOptions = options as SimpleBoxOptions & {
+      allowNet?: unknown;
+      network?: unknown;
+    };
+
+    if (legacyOptions.allowNet !== undefined) {
+      throw new TypeError(
+        "SimpleBoxOptions.allowNet was removed. Use network: { mode, allowNet }.",
+      );
+    }
+
+    if (typeof legacyOptions.network === "string") {
+      throw new TypeError(
+        "SimpleBoxOptions.network must be an object. Use network: { mode, allowNet }.",
+      );
+    }
 
     // Use provided runtime or get global default
     if (options.runtime) {
@@ -305,11 +355,13 @@ export class SimpleBox {
         ? Object.entries(options.env).map(([key, value]) => ({ key, value }))
         : undefined,
       volumes: options.volumes,
+      network: options.network,
       ports: options.ports,
       entrypoint: options.entrypoint,
       cmd: options.cmd,
       user: options.user,
       security,
+      secrets: options.secrets,
     };
 
     this._name = options.name;

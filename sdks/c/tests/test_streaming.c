@@ -5,6 +5,7 @@
  */
 
 #include "boxlite.h"
+#include "test_runtime.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,13 +40,14 @@ void test_streaming_stdout() {
   CBoxliteRuntime *runtime = NULL;
   CBoxliteError error = {0};
   const char *temp_dir = "/tmp/boxlite-test-streaming-stdout";
-  BoxliteErrorCode code = boxlite_runtime_new(temp_dir, NULL, &runtime, &error);
-  assert(code == Ok);
-  assert(runtime != NULL);
+  reset_test_home(temp_dir);
+  runtime = new_test_runtime(temp_dir, &error);
+  BoxliteErrorCode code = Ok;
 
   const char *options =
       "{\"rootfs\":{\"Image\":\"alpine:3.19\"},\"env\":[],\"volumes\":[],"
-      "\"network\":\"Isolated\",\"ports\":[],\"auto_remove\":false}";
+      "\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},\"ports\":[],\"auto_"
+      "remove\":false}";
   CBoxHandle *box = NULL;
   code = boxlite_create_box(runtime, options, &box, &error);
   assert(code == Ok);
@@ -82,13 +84,14 @@ void test_streaming_stderr() {
   CBoxliteRuntime *runtime = NULL;
   CBoxliteError error = {0};
   const char *temp_dir = "/tmp/boxlite-test-streaming-stderr";
-  BoxliteErrorCode code = boxlite_runtime_new(temp_dir, NULL, &runtime, &error);
-  assert(code == Ok);
-  assert(runtime != NULL);
+  reset_test_home(temp_dir);
+  runtime = new_test_runtime(temp_dir, &error);
+  BoxliteErrorCode code = Ok;
 
   const char *options =
       "{\"rootfs\":{\"Image\":\"alpine:3.19\"},\"env\":[],\"volumes\":[],"
-      "\"network\":\"Isolated\",\"ports\":[],\"auto_remove\":false}";
+      "\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},\"ports\":[],\"auto_"
+      "remove\":false}";
   CBoxHandle *box = NULL;
   code = boxlite_create_box(runtime, options, &box, &error);
   assert(code == Ok);
@@ -123,13 +126,14 @@ void test_streaming_both() {
   CBoxliteRuntime *runtime = NULL;
   CBoxliteError error = {0};
   const char *temp_dir = "/tmp/boxlite-test-streaming-both";
-  BoxliteErrorCode code = boxlite_runtime_new(temp_dir, NULL, &runtime, &error);
-  assert(code == Ok);
-  assert(runtime != NULL);
+  reset_test_home(temp_dir);
+  runtime = new_test_runtime(temp_dir, &error);
+  BoxliteErrorCode code = Ok;
 
   const char *options =
       "{\"rootfs\":{\"Image\":\"alpine:3.19\"},\"env\":[],\"volumes\":[],"
-      "\"network\":\"Isolated\",\"ports\":[],\"auto_remove\":false}";
+      "\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},\"ports\":[],\"auto_"
+      "remove\":false}";
   CBoxHandle *box = NULL;
   code = boxlite_create_box(runtime, options, &box, &error);
   assert(code == Ok);
@@ -198,13 +202,14 @@ void test_streaming_with_context() {
   CBoxliteRuntime *runtime = NULL;
   CBoxliteError error = {0};
   const char *temp_dir = "/tmp/boxlite-test-streaming-context";
-  BoxliteErrorCode code = boxlite_runtime_new(temp_dir, NULL, &runtime, &error);
-  assert(code == Ok);
-  assert(runtime != NULL);
+  reset_test_home(temp_dir);
+  runtime = new_test_runtime(temp_dir, &error);
+  BoxliteErrorCode code = Ok;
 
   const char *options =
       "{\"rootfs\":{\"Image\":\"alpine:3.19\"},\"env\":[],\"volumes\":[],"
-      "\"network\":\"Isolated\",\"ports\":[],\"auto_remove\":false}";
+      "\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},\"ports\":[],\"auto_"
+      "remove\":false}";
   CBoxHandle *box = NULL;
   code = boxlite_create_box(runtime, options, &box, &error);
   assert(code == Ok);
@@ -237,13 +242,14 @@ void test_streaming_large_output() {
   CBoxliteRuntime *runtime = NULL;
   CBoxliteError error = {0};
   const char *temp_dir = "/tmp/boxlite-test-streaming-large";
-  BoxliteErrorCode code = boxlite_runtime_new(temp_dir, NULL, &runtime, &error);
-  assert(code == Ok);
-  assert(runtime != NULL);
+  reset_test_home(temp_dir);
+  runtime = new_test_runtime(temp_dir, &error);
+  BoxliteErrorCode code = Ok;
 
   const char *options =
       "{\"rootfs\":{\"Image\":\"alpine:3.19\"},\"env\":[],\"volumes\":[],"
-      "\"network\":\"Isolated\",\"ports\":[],\"auto_remove\":false}";
+      "\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},\"ports\":[],\"auto_"
+      "remove\":false}";
   CBoxHandle *box = NULL;
   code = boxlite_create_box(runtime, options, &box, &error);
   assert(code == Ok);
@@ -277,13 +283,14 @@ void test_streaming_no_callback() {
   CBoxliteRuntime *runtime = NULL;
   CBoxliteError error = {0};
   const char *temp_dir = "/tmp/boxlite-test-streaming-nocallback";
-  BoxliteErrorCode code = boxlite_runtime_new(temp_dir, NULL, &runtime, &error);
-  assert(code == Ok);
-  assert(runtime != NULL);
+  reset_test_home(temp_dir);
+  runtime = new_test_runtime(temp_dir, &error);
+  BoxliteErrorCode code = Ok;
 
   const char *options =
       "{\"rootfs\":{\"Image\":\"alpine:3.19\"},\"env\":[],\"volumes\":[],"
-      "\"network\":\"Isolated\",\"ports\":[],\"auto_remove\":false}";
+      "\"network\":{\"mode\":\"enabled\",\"allow_net\":[]},\"ports\":[],\"auto_"
+      "remove\":false}";
   CBoxHandle *box = NULL;
   code = boxlite_create_box(runtime, options, &box, &error);
   assert(code == Ok);

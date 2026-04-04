@@ -103,10 +103,22 @@ Configuration options for creating a box.
 | `workingDir` | `string` | `"/root"` | Working directory inside container |
 | `env` | `JsEnvVar[]` | `[]` | Environment variables |
 | `volumes` | `JsVolumeSpec[]` | `[]` | Volume mounts |
-| `network` | `string` | `"isolated"` | Network mode |
+| `network` | `NetworkSpec` | `{ mode: "enabled" }` | Structured network configuration |
 | `ports` | `JsPortSpec[]` | `[]` | Port mappings |
+| `secrets` | `Secret[]` | `[]` | Outbound HTTP(S) secret substitution rules |
 | `autoRemove` | `boolean` | `false` | Auto cleanup when stopped |
 | `detach` | `boolean` | `false` | Survive parent process exit |
+
+#### `NetworkSpec`
+
+```typescript
+interface NetworkSpec {
+  mode: "enabled" | "disabled";
+  allowNet?: string[];
+}
+```
+
+Use `allowNet` only when `mode: "enabled"`. Empty or omitted `allowNet` means full outbound access. `mode: "disabled"` removes the guest network interface entirely.
 
 #### `JsEnvVar`
 
@@ -135,6 +147,17 @@ interface JsPortSpec {
   guestPort: number;   // Port inside container
   protocol?: string;   // "tcp" or "udp" (default: "tcp")
   hostIp?: string;     // Default: "0.0.0.0"
+}
+```
+
+#### `Secret`
+
+```typescript
+interface Secret {
+  name: string;
+  value: string;
+  hosts?: string[];
+  placeholder?: string; // Default: `<BOXLITE_SECRET:${name}>`
 }
 ```
 
@@ -288,7 +311,9 @@ interface SimpleBoxOptions {
   workingDir?: string;    // Working directory
   env?: Record<string, string>;  // Environment variables
   volumes?: VolumeSpec[]; // Volume mounts
+  network?: NetworkSpec;
   ports?: PortSpec[];     // Port mappings
+  secrets?: Secret[];
 }
 ```
 
