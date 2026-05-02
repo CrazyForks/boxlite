@@ -58,6 +58,11 @@ typedef enum BoxliteErrorCode {
   ResourceExhausted = 20,
 } BoxliteErrorCode;
 
+typedef enum BoxliteRegistryTransport {
+  BoxliteRegistryTransportHttps = 0,
+  BoxliteRegistryTransportHttp = 1,
+} BoxliteRegistryTransport;
+
 // Opaque handle to a running box.
 typedef struct BoxHandle BoxHandle;
 
@@ -194,6 +199,16 @@ typedef struct CRuntimeMetrics {
   int total_commands_executed;
   int total_exec_errors;
 } CRuntimeMetrics;
+
+typedef struct BoxliteImageRegistry {
+  const char *host;
+  enum BoxliteRegistryTransport transport;
+  int skip_verify;
+  int search;
+  const char *username;
+  const char *password;
+  const char *bearer_token;
+} BoxliteImageRegistry;
 
 #ifdef __cplusplus
 extern "C" {
@@ -365,8 +380,8 @@ void boxlite_options_free(CBoxliteOptions *opts);
 const char *boxlite_version(void);
 
 enum BoxliteErrorCode boxlite_runtime_new(const char *home_dir,
-                                          const char *const *registries,
-                                          int registries_count,
+                                          const struct BoxliteImageRegistry *image_registries,
+                                          int image_registries_count,
                                           CBoxliteRuntime **out_runtime,
                                           CBoxliteError *out_error);
 

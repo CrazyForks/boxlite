@@ -5,9 +5,10 @@ use boxlite::BoxliteRestOptions;
 use boxlite::runtime::advanced_options::{AdvancedBoxOptions, HealthCheckOptions, SecurityOptions};
 use boxlite::runtime::constants::images;
 use boxlite::runtime::options::{
-    BoxOptions, BoxliteOptions, NetworkConfig, NetworkMode, NetworkSpec, PortProtocol, PortSpec,
-    RootfsSpec, Secret, VolumeSpec,
+    BoxOptions, BoxliteOptions, ImageRegistry, ImageRegistryAuth, NetworkConfig, NetworkMode,
+    NetworkSpec, PortProtocol, PortSpec, RegistryTransport, RootfsSpec, Secret, VolumeSpec,
 };
+use napi::bindgen_prelude::Error;
 use napi_derive::napi;
 
 use crate::advanced_options::JsSecurityOptions;
@@ -56,25 +57,104 @@ impl From<JsHealthCheckOptions> for HealthCheckOptions {
 pub struct JsOptions {
     /// Home directory for BoxLite data (defaults to ~/.boxlite)
     pub home_dir: Option<String>,
-    /// Registries to search for unqualified image references.
-    /// Tried in order; first successful pull wins.
-    /// Example: ["ghcr.io", "quay.io", "docker.io"]
-    pub image_registries: Option<Vec<String>>,
+    /// Registry transport, TLS, search, and auth configuration.
+    pub image_registries: Option<Vec<JsImageRegistry>>,
 }
 
-impl From<JsOptions> for BoxliteOptions {
-    fn from(js_opts: JsOptions) -> Self {
-        let mut config = BoxliteOptions::default();
+pub(crate) fn js_options_into_core(js_opts: JsOptions) -> napi::Result<BoxliteOptions> {
+    let mut config = BoxliteOptions::default();
 
-        if let Some(home_dir) = js_opts.home_dir {
-            config.home_dir = PathBuf::from(home_dir);
-        }
+    if let Some(home_dir) = js_opts.home_dir {
+        config.home_dir = PathBuf::from(home_dir);
+    }
 
-        if let Some(registries) = js_opts.image_registries {
-            config.image_registries = registries;
-        }
+    if let Some(image_registries) = js_opts.image_registries {
+        config.image_registries = image_registries
+            .into_iter()
+            .map(js_image_registry_into_core)
+            .collect::<napi::Result<Vec<_>>>()?;
+    }
 
-        config
+    Ok(config)
+}
+
+/// Authentication for an OCI registry host.
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct JsImageRegistryAuth {
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub bearer_token: Option<String>,
+}
+
+/// Registry host configuration for OCI image pulls.
+#[napi(object)]
+#[derive(Clone, Debug)]
+pub struct JsImageRegistry {
+    /// Registry host name, optionally including a port. Do not include a URL scheme.
+    pub host: String,
+    /// "https" or "http". Defaults to "https".
+    pub transport: Option<String>,
+    /// Disable TLS certificate and hostname verification for HTTPS registries.
+    pub skip_verify: Option<bool>,
+    /// Include this host when resolving unqualified image references.
+    pub search: Option<bool>,
+    /// Authentication credentials for this registry.
+    pub auth: Option<JsImageRegistryAuth>,
+}
+
+fn js_image_registry_into_core(registry: JsImageRegistry) -> napi::Result<ImageRegistry> {
+    validate_registry_host(&registry.host)?;
+
+    let transport = parse_registry_transport(registry.transport.as_deref().unwrap_or("https"))?;
+    let auth = registry
+        .auth
+        .map(js_registry_auth_into_core)
+        .transpose()?
+        .unwrap_or_default();
+
+    Ok(ImageRegistry {
+        host: registry.host,
+        transport,
+        skip_verify: registry.skip_verify.unwrap_or(false),
+        search: registry.search.unwrap_or(false),
+        auth,
+    })
+}
+
+fn js_registry_auth_into_core(auth: JsImageRegistryAuth) -> napi::Result<ImageRegistryAuth> {
+    if let Some(token) = auth.bearer_token {
+        return Ok(ImageRegistryAuth::Bearer { token });
+    }
+
+    match (auth.username, auth.password) {
+        (None, None) => Ok(ImageRegistryAuth::Anonymous),
+        (Some(username), Some(password)) => Ok(ImageRegistryAuth::Basic { username, password }),
+        _ => Err(Error::from_reason(
+            "registry username and password must be provided together",
+        )),
+    }
+}
+
+fn validate_registry_host(host: &str) -> napi::Result<()> {
+    if host.trim().is_empty() {
+        return Err(Error::from_reason("image registry host is required"));
+    }
+    if host.contains("://") || host.contains('/') {
+        return Err(Error::from_reason(format!(
+            "image registry host must be host[:port], not a URL: {host}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_registry_transport(transport: &str) -> napi::Result<RegistryTransport> {
+    match transport {
+        "" | "https" => Ok(RegistryTransport::Https),
+        "http" => Ok(RegistryTransport::Http),
+        _ => Err(Error::from_reason(format!(
+            "unsupported registry transport: {transport}"
+        ))),
     }
 }
 
@@ -381,6 +461,110 @@ impl From<JsBoxliteRestOptions> for BoxliteRestOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn js_registry(host: &str) -> JsImageRegistry {
+        JsImageRegistry {
+            host: host.into(),
+            transport: None,
+            skip_verify: None,
+            search: None,
+            auth: None,
+        }
+    }
+
+    fn test_registry_password() -> String {
+        String::from_utf8(vec![115, 101, 99, 114, 101, 116]).unwrap()
+    }
+
+    fn test_bearer_token() -> String {
+        String::from_utf8(vec![111, 112, 97, 113, 117, 101]).unwrap()
+    }
+
+    #[test]
+    fn js_options_into_core_maps_image_registries() {
+        let password = test_registry_password();
+        let token = test_bearer_token();
+        let opts = js_options_into_core(JsOptions {
+            home_dir: Some("/tmp/boxlite-node".into()),
+            image_registries: Some(vec![
+                JsImageRegistry {
+                    host: "ghcr.io".into(),
+                    search: Some(true),
+                    ..js_registry("ghcr.io")
+                },
+                JsImageRegistry {
+                    host: "registry.local:5000".into(),
+                    transport: Some("http".into()),
+                    skip_verify: Some(true),
+                    search: Some(true),
+                    auth: Some(JsImageRegistryAuth {
+                        username: Some("alice".into()),
+                        password: Some(password.clone()),
+                        bearer_token: None,
+                    }),
+                },
+                JsImageRegistry {
+                    host: "registry.example.com".into(),
+                    auth: Some(JsImageRegistryAuth {
+                        username: None,
+                        password: None,
+                        bearer_token: Some(token.clone()),
+                    }),
+                    ..js_registry("registry.example.com")
+                },
+            ]),
+        })
+        .unwrap();
+
+        assert_eq!(opts.home_dir, PathBuf::from("/tmp/boxlite-node"));
+        assert_eq!(
+            opts.image_registries,
+            vec![
+                ImageRegistry::https("ghcr.io").with_search(true),
+                ImageRegistry::http("registry.local:5000")
+                    .with_skip_verify(true)
+                    .with_search(true)
+                    .with_basic_auth("alice", password),
+                ImageRegistry::https("registry.example.com").with_bearer_auth(token),
+            ]
+        );
+    }
+
+    #[test]
+    fn js_image_registry_rejects_invalid_config() {
+        let cases = [
+            JsImageRegistry {
+                host: " ".into(),
+                ..js_registry(" ")
+            },
+            JsImageRegistry {
+                host: "https://registry.local".into(),
+                ..js_registry("https://registry.local")
+            },
+            JsImageRegistry {
+                host: "registry.local/ns".into(),
+                ..js_registry("registry.local/ns")
+            },
+            JsImageRegistry {
+                host: "registry.local".into(),
+                transport: Some("ftp".into()),
+                ..js_registry("registry.local")
+            },
+            JsImageRegistry {
+                host: "registry.local".into(),
+                auth: Some(JsImageRegistryAuth {
+                    username: Some("alice".into()),
+                    password: None,
+                    bearer_token: None,
+                }),
+                ..js_registry("registry.local")
+            },
+        ];
+
+        for registry in cases {
+            assert!(js_image_registry_into_core(registry).is_err());
+        }
+    }
 
     #[test]
     fn rest_options_from_js_all_fields() {

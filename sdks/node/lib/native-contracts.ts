@@ -99,7 +99,21 @@ export interface JsBoxOptions {
 
 export interface JsOptions {
   homeDir?: string;
-  imageRegistries?: string[];
+  imageRegistries?: JsImageRegistry[];
+}
+
+export interface JsImageRegistryAuth {
+  username?: string;
+  password?: string;
+  bearerToken?: string;
+}
+
+export interface JsImageRegistry {
+  host: string;
+  transport?: "https" | "http";
+  skipVerify?: boolean;
+  search?: boolean;
+  auth?: JsImageRegistryAuth;
 }
 
 export interface JsBoxliteRestOptions {

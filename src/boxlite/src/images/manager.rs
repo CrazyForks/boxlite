@@ -18,6 +18,7 @@ use super::blob_source::{BlobSource, LocalBundleBlobSource, StoreBlobSource};
 use super::object::ImageObject;
 use crate::db::Database;
 use crate::images::store::{ImageStore, SharedImageStore};
+use crate::runtime::options::ImageRegistry;
 use crate::runtime::types::ImageInfo;
 use boxlite_shared::errors::BoxliteResult;
 use oci_client::Reference;
@@ -96,9 +97,13 @@ impl ImageManager {
     /// # Arguments
     /// * `images_dir` - Directory for image cache
     /// * `db` - Database for image index
-    /// * `registries` - Registries to search for unqualified images (tried in order)
-    pub fn new(images_dir: PathBuf, db: Database, registries: Vec<String>) -> BoxliteResult<Self> {
-        let store = Arc::new(ImageStore::new(images_dir, db, registries)?);
+    /// * `image_registries` - Registry transport, TLS, auth, and search settings
+    pub fn new(
+        images_dir: PathBuf,
+        db: Database,
+        image_registries: Vec<ImageRegistry>,
+    ) -> BoxliteResult<Self> {
+        let store = Arc::new(ImageStore::new(images_dir, db, image_registries)?);
         Ok(Self { store })
     }
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::runtime::advanced_options::{AdvancedBoxOptions, SecurityOptions};
+use std::fmt;
 
 // ============================================================================
 // Runtime Options
@@ -19,29 +20,140 @@ use crate::runtime::advanced_options::{AdvancedBoxOptions, SecurityOptions};
 pub struct BoxliteOptions {
     #[serde(default = "default_home_dir")]
     pub home_dir: PathBuf,
-    /// Registries to search for unqualified image references.
+    /// OCI registry configuration for image pulls.
     ///
-    /// When pulling an image without a registry prefix (e.g., `"alpine"`),
-    /// these registries are tried in order until one succeeds.
+    /// Use this to configure registry transport, TLS verification, auth, and
+    /// whether the registry participates in unqualified image resolution.
     ///
-    /// - Empty list (default): Uses docker.io as the implicit default
-    /// - Non-empty list: Tries each registry in order, first success wins
-    /// - Fully qualified refs (e.g., `"quay.io/foo"`) bypass this list
+    /// - Empty list (default): Uses docker.io as the implicit default for
+    ///   unqualified references
+    /// - `search = true`: Includes the registry when resolving unqualified
+    ///   image references
+    /// - Fully qualified refs (e.g., `"quay.io/foo"`) use the matching
+    ///   registry entry for transport, TLS, and auth
     ///
     /// # Example
     ///
     /// ```ignore
     /// BoxliteOptions {
     ///     image_registries: vec![
-    ///         "ghcr.io/myorg".to_string(),
-    ///         "docker.io".to_string(),
+    ///         ImageRegistry::https("ghcr.io/myorg").with_search(true),
+    ///         ImageRegistry::https("docker.io").with_search(true),
     ///     ],
     ///     ..Default::default()
     /// }
-    /// // "alpine" → tries ghcr.io/myorg/alpine, then docker.io/alpine
+    /// // "alpine" tries ghcr.io/myorg/alpine, then docker.io/alpine
     /// ```
     #[serde(default)]
-    pub image_registries: Vec<String>,
+    pub image_registries: Vec<ImageRegistry>,
+}
+
+/// Registry host configuration for OCI image pulls.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageRegistry {
+    /// Registry host name, optionally including a port. Do not include a URL scheme.
+    pub host: String,
+    /// Transport to use when contacting this registry.
+    #[serde(default)]
+    pub transport: RegistryTransport,
+    /// Disable TLS certificate and hostname verification for HTTPS registries.
+    #[serde(default)]
+    pub skip_verify: bool,
+    /// Include this host when resolving unqualified image references.
+    #[serde(default)]
+    pub search: bool,
+    /// Authentication credentials for this registry.
+    #[serde(default)]
+    pub auth: ImageRegistryAuth,
+}
+
+impl ImageRegistry {
+    pub fn https(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            transport: RegistryTransport::Https,
+            skip_verify: false,
+            search: false,
+            auth: ImageRegistryAuth::Anonymous,
+        }
+    }
+
+    pub fn http(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            transport: RegistryTransport::Http,
+            skip_verify: false,
+            search: false,
+            auth: ImageRegistryAuth::Anonymous,
+        }
+    }
+
+    pub fn with_skip_verify(mut self, skip_verify: bool) -> Self {
+        self.skip_verify = skip_verify;
+        self
+    }
+
+    pub fn with_search(mut self, search: bool) -> Self {
+        self.search = search;
+        self
+    }
+
+    pub fn with_basic_auth(
+        mut self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.auth = ImageRegistryAuth::Basic {
+            username: username.into(),
+            password: password.into(),
+        };
+        self
+    }
+
+    pub fn with_bearer_auth(mut self, token: impl Into<String>) -> Self {
+        self.auth = ImageRegistryAuth::Bearer {
+            token: token.into(),
+        };
+        self
+    }
+}
+
+/// Transport used for OCI registry requests.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegistryTransport {
+    #[default]
+    Https,
+    Http,
+}
+
+/// Authentication for an OCI registry host.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageRegistryAuth {
+    #[default]
+    Anonymous,
+    Basic {
+        username: String,
+        password: String,
+    },
+    Bearer {
+        token: String,
+    },
+}
+
+impl fmt::Debug for ImageRegistryAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Anonymous => f.write_str("Anonymous"),
+            Self::Basic { username, .. } => f
+                .debug_struct("Basic")
+                .field("username", username)
+                .field("password", &"***")
+                .finish(),
+            Self::Bearer { .. } => f.debug_struct("Bearer").field("token", &"***").finish(),
+        }
+    }
 }
 
 fn default_home_dir() -> PathBuf {
@@ -60,6 +172,141 @@ impl Default for BoxliteOptions {
             home_dir: default_home_dir(),
             image_registries: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_options_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn test_registry_password() -> String {
+        String::from_utf8(vec![115, 101, 99, 114, 101, 116]).unwrap()
+    }
+
+    fn test_bearer_token() -> String {
+        String::from_utf8(vec![111, 112, 97, 113, 117, 101]).unwrap()
+    }
+
+    #[test]
+    fn options_deserialize_structured_image_registries() {
+        let password = test_registry_password();
+        let token = test_bearer_token();
+        let json = json!({
+            "home_dir": "/tmp/boxlite-test",
+            "image_registries": [
+                {"host": "ghcr.io", "search": true},
+                {
+                    "host": "registry.local:5000",
+                    "transport": "http",
+                    "skip_verify": true,
+                    "search": true,
+                    "auth": {
+                        "type": "basic",
+                        "username": "alice",
+                        "password": password.clone(),
+                    }
+                },
+                {
+                    "host": "registry.example.com",
+                    "auth": {
+                        "type": "bearer",
+                        "token": token.clone(),
+                    }
+                }
+            ]
+        })
+        .to_string();
+
+        let options: BoxliteOptions = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(options.home_dir, PathBuf::from("/tmp/boxlite-test"));
+        assert_eq!(
+            options.image_registries,
+            vec![
+                ImageRegistry::https("ghcr.io").with_search(true),
+                ImageRegistry::http("registry.local:5000")
+                    .with_skip_verify(true)
+                    .with_search(true)
+                    .with_basic_auth("alice", password),
+                ImageRegistry::https("registry.example.com").with_bearer_auth(token),
+            ]
+        );
+    }
+
+    #[test]
+    fn options_reject_legacy_string_image_registries() {
+        let result =
+            serde_json::from_str::<BoxliteOptions>(r#"{"image_registries": ["docker.io"]}"#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn options_serialize_structured_image_registries() {
+        let password = test_registry_password();
+        let token = test_bearer_token();
+        let options = BoxliteOptions {
+            home_dir: PathBuf::from("/tmp/boxlite-test"),
+            image_registries: vec![
+                ImageRegistry::http("registry.local:5000")
+                    .with_skip_verify(true)
+                    .with_search(true)
+                    .with_basic_auth("alice", password.as_str()),
+                ImageRegistry::https("registry.example.com").with_bearer_auth(token.as_str()),
+            ],
+        };
+
+        let value = serde_json::to_value(options).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "home_dir": "/tmp/boxlite-test",
+                "image_registries": [
+                    {
+                        "host": "registry.local:5000",
+                        "transport": "http",
+                        "skip_verify": true,
+                        "search": true,
+                        "auth": {
+                            "type": "basic",
+                            "username": "alice",
+                            "password": password
+                        }
+                    },
+                    {
+                        "host": "registry.example.com",
+                        "transport": "https",
+                        "skip_verify": false,
+                        "search": false,
+                        "auth": {
+                            "type": "bearer",
+                            "token": token
+                        }
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn image_registry_debug_redacts_credentials() {
+        let password = test_registry_password();
+        let token = test_bearer_token();
+        let basic = format!(
+            "{:?}",
+            ImageRegistry::https("registry.example.com")
+                .with_basic_auth("alice", password.as_str())
+        );
+        let bearer = format!(
+            "{:?}",
+            ImageRegistry::https("registry.example.com").with_bearer_auth(token.as_str())
+        );
+
+        assert!(basic.contains("alice"));
+        assert!(!basic.contains(&password));
+        assert!(!bearer.contains(&token));
     }
 }
 

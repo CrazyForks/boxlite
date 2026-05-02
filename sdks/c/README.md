@@ -335,11 +335,26 @@ The Native API provides full control and advanced features.
 // Get version
 const char* boxlite_version(void);
 
+typedef enum BoxliteRegistryTransport {
+    BoxliteRegistryTransportHttps = 0,
+    BoxliteRegistryTransportHttp = 1,
+} BoxliteRegistryTransport;
+
+typedef struct BoxliteImageRegistry {
+    const char* host;
+    BoxliteRegistryTransport transport;
+    int skip_verify;
+    int search;
+    const char* username;
+    const char* password;
+    const char* bearer_token;
+} BoxliteImageRegistry;
+
 // Create runtime with options
 BoxliteErrorCode boxlite_runtime_new(
     const char* home_dir,            // NULL = ~/.boxlite
-    const char* const* registries,   // NULL = default registries
-    int registries_count,
+    const BoxliteImageRegistry* image_registries, // NULL = default registries
+    int image_registries_count,
     CBoxliteRuntime** out_runtime,
     CBoxliteError* out_error
 );

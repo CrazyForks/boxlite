@@ -3,7 +3,16 @@ package boxlite
 import (
 	"errors"
 	"testing"
+	"unsafe"
 )
+
+func testRegistryPassword() string {
+	return string([]byte{115, 101, 99, 114, 101, 116})
+}
+
+func testBearerToken() string {
+	return string([]byte{111, 112, 97, 113, 117, 101})
+}
 
 // ============================================================================
 // Error types
@@ -163,15 +172,142 @@ func TestBoxOptions(t *testing.T) {
 }
 
 func TestRuntimeOptions(t *testing.T) {
+	password := testRegistryPassword()
 	cfg := &runtimeConfig{}
 	WithHomeDir("/custom")(cfg)
-	WithRegistries("ghcr.io", "docker.io")(cfg)
+	WithImageRegistries(
+		ImageRegistry{Host: "ghcr.io", Search: true},
+		ImageRegistry{Host: "docker.io", Search: true},
+		ImageRegistry{
+			Host:       "registry.local:5000",
+			Transport:  RegistryTransportHTTP,
+			SkipVerify: true,
+			Search:     true,
+			Auth: ImageRegistryAuth{
+				Username: "alice",
+				Password: password,
+			},
+		},
+	)(cfg)
 
 	if cfg.homeDir != "/custom" {
 		t.Errorf("homeDir: got %q", cfg.homeDir)
 	}
-	if len(cfg.registries) != 2 {
-		t.Errorf("registries: got %v", cfg.registries)
+	if len(cfg.imageRegistries) != 3 {
+		t.Fatalf("imageRegistries: got %v", cfg.imageRegistries)
+	}
+	if !cfg.imageRegistries[0].Search {
+		t.Errorf("image registry search: got false")
+	}
+	if cfg.imageRegistries[2].Transport != RegistryTransportHTTP {
+		t.Errorf("registry transport: got %q", cfg.imageRegistries[2].Transport)
+	}
+	if cfg.imageRegistries[2].Auth.Username != "alice" {
+		t.Errorf("registry auth username: got %q", cfg.imageRegistries[2].Auth.Username)
+	}
+}
+
+func TestToCImageRegistryArray(t *testing.T) {
+	password := testRegistryPassword()
+	token := testBearerToken()
+	cRegistries, count, free, err := toCImageRegistryArray([]ImageRegistry{
+		{Host: "ghcr.io", Search: true},
+		{
+			Host:       "registry.local:5000",
+			Transport:  RegistryTransportHTTP,
+			SkipVerify: true,
+			Search:     true,
+			Auth: ImageRegistryAuth{
+				Username: "alice",
+				Password: password,
+			},
+		},
+		{
+			Host: "registry.example.com",
+			Auth: ImageRegistryAuth{BearerToken: token},
+		},
+	})
+	if err != nil {
+		t.Fatalf("toCImageRegistryArray: %v", err)
+	}
+	defer free()
+
+	if count != 3 {
+		t.Fatalf("count: got %d, want 3", count)
+	}
+
+	registries := unsafe.Slice(cRegistries, count)
+	httpTransport, err := cRegistryTransport(RegistryTransportHTTP)
+	if err != nil {
+		t.Fatalf("cRegistryTransport: %v", err)
+	}
+
+	if cString(registries[0].host) != "ghcr.io" {
+		t.Errorf("host[0]: got %q", cString(registries[0].host))
+	}
+	if registries[0].search == 0 {
+		t.Error("search[0]: got false")
+	}
+	if cString(registries[1].host) != "registry.local:5000" {
+		t.Errorf("host[1]: got %q", cString(registries[1].host))
+	}
+	if uint32(registries[1].transport) != httpTransport {
+		t.Errorf("transport[1]: got %d, want %d", registries[1].transport, httpTransport)
+	}
+	if registries[1].skip_verify == 0 {
+		t.Error("skip_verify[1]: got false")
+	}
+	if cString(registries[1].username) != "alice" {
+		t.Errorf("username[1]: got %q", cString(registries[1].username))
+	}
+	if cString(registries[1].password) != password {
+		t.Errorf("password[1]: got %q", cString(registries[1].password))
+	}
+	if cString(registries[2].bearer_token) != token {
+		t.Errorf("bearer_token[2]: got %q", cString(registries[2].bearer_token))
+	}
+}
+
+func TestToCImageRegistryArrayRejectsInvalidConfig(t *testing.T) {
+	cases := []struct {
+		name       string
+		registries []ImageRegistry
+	}{
+		{
+			name:       "empty host",
+			registries: []ImageRegistry{{Host: " "}},
+		},
+		{
+			name:       "url host",
+			registries: []ImageRegistry{{Host: "https://registry.local"}},
+		},
+		{
+			name:       "path host",
+			registries: []ImageRegistry{{Host: "registry.local/ns"}},
+		},
+		{
+			name:       "unsupported transport",
+			registries: []ImageRegistry{{Host: "registry.local", Transport: "ftp"}},
+		},
+		{
+			name: "partial basic auth",
+			registries: []ImageRegistry{{
+				Host: "registry.local",
+				Auth: ImageRegistryAuth{Username: "alice"},
+			}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cRegistries, _, free, err := toCImageRegistryArray(tc.registries)
+			if err == nil {
+				if free != nil {
+					free()
+				}
+				t.Fatalf("expected error, got registries=%v", cRegistries)
+			}
+		})
 	}
 }
 

@@ -25,7 +25,7 @@ Complete API reference for the BoxLite Python SDK.
 The main runtime for creating and managing boxes.
 
 ```python
-from boxlite import Boxlite, Options, BoxOptions
+from boxlite import Boxlite, Options, BoxOptions, ImageRegistry
 ```
 
 #### Class Methods
@@ -53,6 +53,17 @@ runtime = Boxlite.default()
 # Custom runtime
 runtime = Boxlite(Options(home_dir="/custom/path"))
 
+# Registry host config with auth
+runtime = Boxlite(Options(
+    image_registries=[
+        ImageRegistry(
+            host="registry.example.com",
+            username="user",
+            password="password",
+        )
+    ]
+))
+
 # Create a box
 box = await runtime.create(BoxOptions(image="alpine:latest"))
 
@@ -70,7 +81,38 @@ Runtime configuration options.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `home_dir` | `str` | `~/.boxlite` | Base directory for runtime data |
-| `image_registries` | `List[str]` | `[]` | Custom image registries for unqualified references |
+| `image_registries` | `List[ImageRegistry]` | `[]` | Registry transport, TLS, search, and auth configuration |
+
+#### `boxlite.ImageRegistry`
+
+```python
+ImageRegistry(
+    host="registry.local:5000",
+    transport="http",
+    search=True,
+)
+
+ImageRegistry(
+    host="registry.example.com",
+    skip_verify=True,
+    username="user",
+    password="password",
+)
+
+ImageRegistry(
+    host="ghcr.io",
+    bearer_token="token",
+)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `host` | `str` | Required | Registry host, optionally with port. Do not include `http://` or `https://` |
+| `transport` | `str` | `"https"` | `"https"` or `"http"` |
+| `skip_verify` | `bool` | `False` | Disable TLS certificate and hostname verification for HTTPS registries |
+| `search` | `bool` | `False` | Include this host when resolving unqualified image references |
+| `username` / `password` | `str \| None` | `None` | Basic auth credentials. Provide both together |
+| `bearer_token` | `str \| None` | `None` | Bearer token auth |
 
 ---
 

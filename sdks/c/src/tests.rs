@@ -132,6 +132,42 @@ fn test_null_pointer_validation() {
 }
 
 #[test]
+fn test_runtime_accepts_image_registry_config() {
+    let home_dir = unique_test_home("registry-config");
+    let home_dir_c = CString::new(home_dir.display().to_string()).expect("home dir cstring");
+    let host = CString::new("registry.local:5000").unwrap();
+    let username = CString::new("alice").unwrap();
+    let password = CString::new("secret").unwrap();
+    let registry = crate::runtime::BoxliteImageRegistry {
+        host: host.as_ptr(),
+        transport: crate::runtime::BoxliteRegistryTransport::BoxliteRegistryTransportHttp,
+        skip_verify: 0,
+        search: 1,
+        username: username.as_ptr(),
+        password: password.as_ptr(),
+        bearer_token: ptr::null(),
+    };
+    let mut runtime: *mut crate::runtime::RuntimeHandle = ptr::null_mut();
+    let mut error = FFIError::default();
+
+    let code = unsafe {
+        boxlite_runtime_new(
+            home_dir_c.as_ptr(),
+            &registry as *const _,
+            1,
+            &mut runtime as *mut _,
+            &mut error as *mut _,
+        )
+    };
+
+    assert_eq!(code, BoxliteErrorCode::Ok);
+    assert!(!runtime.is_null());
+    unsafe {
+        boxlite_runtime_free(runtime);
+    }
+}
+
+#[test]
 fn test_runtime_images_null_pointer_validation() {
     unsafe {
         let mut error = FFIError::default();

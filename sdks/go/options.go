@@ -16,8 +16,32 @@ import (
 type RuntimeOption func(*runtimeConfig)
 
 type runtimeConfig struct {
-	homeDir    string
-	registries []string
+	homeDir         string
+	imageRegistries []ImageRegistry
+}
+
+// RegistryTransport selects the transport used to contact an OCI registry.
+type RegistryTransport string
+
+const (
+	RegistryTransportHTTPS RegistryTransport = "https"
+	RegistryTransportHTTP  RegistryTransport = "http"
+)
+
+// ImageRegistryAuth configures credentials for an OCI registry.
+type ImageRegistryAuth struct {
+	Username    string
+	Password    string
+	BearerToken string
+}
+
+// ImageRegistry configures an OCI registry host.
+type ImageRegistry struct {
+	Host       string
+	Transport  RegistryTransport
+	SkipVerify bool
+	Search     bool
+	Auth       ImageRegistryAuth
 }
 
 // WithHomeDir sets the BoxLite data directory.
@@ -25,9 +49,14 @@ func WithHomeDir(dir string) RuntimeOption {
 	return func(c *runtimeConfig) { c.homeDir = dir }
 }
 
-// WithRegistries sets the OCI registries to use for image pulls.
-func WithRegistries(registries ...string) RuntimeOption {
-	return func(c *runtimeConfig) { c.registries = registries }
+// WithImageRegistry configures transport, TLS, search, and auth for a registry.
+func WithImageRegistry(registry ImageRegistry) RuntimeOption {
+	return func(c *runtimeConfig) { c.imageRegistries = append(c.imageRegistries, registry) }
+}
+
+// WithImageRegistries configures multiple image registries.
+func WithImageRegistries(registries ...ImageRegistry) RuntimeOption {
+	return func(c *runtimeConfig) { c.imageRegistries = append(c.imageRegistries, registries...) }
 }
 
 // BoxOption configures a Box.

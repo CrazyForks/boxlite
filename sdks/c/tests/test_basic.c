@@ -57,7 +57,22 @@ void test_runtime_with_registries() {
 
   CBoxliteRuntime *runtime = NULL;
   CBoxliteError error = {0};
-  const char *const registries[] = {"ghcr.io", "docker.io"};
+  const BoxliteImageRegistry registries[] = {
+      {.host = "ghcr.io",
+       .transport = BoxliteRegistryTransportHttps,
+       .skip_verify = 0,
+       .search = 1,
+       .username = NULL,
+       .password = NULL,
+       .bearer_token = NULL},
+      {.host = "docker.io",
+       .transport = BoxliteRegistryTransportHttps,
+       .skip_verify = 0,
+       .search = 1,
+       .username = NULL,
+       .password = NULL,
+       .bearer_token = NULL},
+  };
 
   BoxliteErrorCode code = boxlite_runtime_new(
       "/tmp/boxlite-test-basic-registries", registries, 2, &runtime, &error);

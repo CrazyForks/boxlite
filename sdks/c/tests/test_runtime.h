@@ -8,9 +8,35 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char *const TEST_REGISTRIES[] = {
-    "docker.m.daocloud.io", "docker.xuanyuan.me", "docker.1ms.run",
-    "docker.io"};
+static const BoxliteImageRegistry TEST_REGISTRIES[] = {
+    {.host = "docker.m.daocloud.io",
+     .transport = BoxliteRegistryTransportHttps,
+     .skip_verify = 0,
+     .search = 1,
+     .username = NULL,
+     .password = NULL,
+     .bearer_token = NULL},
+    {.host = "docker.xuanyuan.me",
+     .transport = BoxliteRegistryTransportHttps,
+     .skip_verify = 0,
+     .search = 1,
+     .username = NULL,
+     .password = NULL,
+     .bearer_token = NULL},
+    {.host = "docker.1ms.run",
+     .transport = BoxliteRegistryTransportHttps,
+     .skip_verify = 0,
+     .search = 1,
+     .username = NULL,
+     .password = NULL,
+     .bearer_token = NULL},
+    {.host = "docker.io",
+     .transport = BoxliteRegistryTransportHttps,
+     .skip_verify = 0,
+     .search = 1,
+     .username = NULL,
+     .password = NULL,
+     .bearer_token = NULL}};
 
 static const int TEST_REGISTRIES_COUNT = 4;
 

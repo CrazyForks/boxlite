@@ -419,10 +419,25 @@ Returns static string (do not free). Example: `"0.5.7"`.
 Create a new runtime instance.
 
 ```c
+typedef enum BoxliteRegistryTransport {
+    BoxliteRegistryTransportHttps = 0,
+    BoxliteRegistryTransportHttp = 1,
+} BoxliteRegistryTransport;
+
+typedef struct BoxliteImageRegistry {
+    const char* host;
+    BoxliteRegistryTransport transport;
+    int skip_verify;
+    int search;
+    const char* username;
+    const char* password;
+    const char* bearer_token;
+} BoxliteImageRegistry;
+
 BoxliteErrorCode boxlite_runtime_new(
     const char* home_dir,
-    const char* const* registries,
-    int registries_count,
+    const BoxliteImageRegistry* image_registries,
+    int image_registries_count,
     CBoxliteRuntime** out_runtime,
     CBoxliteError* out_error
 );
@@ -433,8 +448,8 @@ BoxliteErrorCode boxlite_runtime_new(
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `home_dir` | `const char*` | Path to BoxLite home. `NULL` = default (`~/.boxlite`) |
-| `registries` | `const char* const*` | Optional array of registry hostnames. `NULL` = default registries |
-| `registries_count` | `int` | Number of entries in `registries` |
+| `image_registries` | `const BoxliteImageRegistry*` | Optional registry transport, TLS, search, and auth settings |
+| `image_registries_count` | `int` | Number of entries in `image_registries` |
 | `out_runtime` | `CBoxliteRuntime**` | Output: runtime handle |
 | `out_error` | `CBoxliteError*` | Output: error information |
 
@@ -452,8 +467,27 @@ if (boxlite_runtime_new(NULL, NULL, 0, &runtime, &error) != Ok) {
 }
 
 // Custom registries
-const char* registries[] = {"ghcr.io", "docker.io"};
-if (boxlite_runtime_new("/var/lib/boxlite", registries, 2, &runtime, &error) != Ok) {
+BoxliteImageRegistry image_registries[] = {
+  {
+    .host = "ghcr.io",
+    .transport = BoxliteRegistryTransportHttps,
+    .skip_verify = 0,
+    .search = 1,
+    .username = NULL,
+    .password = NULL,
+    .bearer_token = NULL,
+  },
+  {
+    .host = "registry.example.com",
+    .transport = BoxliteRegistryTransportHttps,
+    .skip_verify = 0,
+    .search = 0,
+    .username = "user",
+    .password = "password",
+    .bearer_token = NULL,
+  },
+};
+if (boxlite_runtime_new("/var/lib/boxlite", image_registries, 2, &runtime, &error) != Ok) {
     // Handle error
 }
 ```

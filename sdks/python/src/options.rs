@@ -5,8 +5,8 @@ use boxlite::litebox::copy::CopyOptions;
 use boxlite::runtime::advanced_options::{HealthCheckOptions, SecurityOptions};
 use boxlite::runtime::constants::images;
 use boxlite::runtime::options::{
-    BoxOptions, BoxliteOptions, NetworkConfig, NetworkMode, NetworkSpec, PortProtocol, PortSpec,
-    RootfsSpec, VolumeSpec,
+    BoxOptions, BoxliteOptions, ImageRegistry, ImageRegistryAuth, NetworkConfig, NetworkMode,
+    NetworkSpec, PortProtocol, PortSpec, RegistryTransport, RootfsSpec, VolumeSpec,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -19,17 +19,16 @@ use crate::advanced_options::PyAdvancedBoxOptions;
 pub(crate) struct PyOptions {
     #[pyo3(get, set)]
     pub(crate) home_dir: Option<String>,
-    /// Registries to search for unqualified image references.
-    /// Tried in order; first successful pull wins.
+    /// Registry transport, TLS, search, and auth configuration.
     #[pyo3(get, set)]
-    pub(crate) image_registries: Vec<String>,
+    pub(crate) image_registries: Vec<PyImageRegistry>,
 }
 
 #[pymethods]
 impl PyOptions {
     #[new]
     #[pyo3(signature = (home_dir=None, image_registries=vec![]))]
-    fn new(home_dir: Option<String>, image_registries: Vec<String>) -> Self {
+    fn new(home_dir: Option<String>, image_registries: Vec<PyImageRegistry>) -> Self {
         Self {
             home_dir,
             image_registries,
@@ -44,18 +43,154 @@ impl PyOptions {
     }
 }
 
-impl From<PyOptions> for BoxliteOptions {
-    fn from(py_opts: PyOptions) -> Self {
+impl PyOptions {
+    pub(crate) fn into_core(self) -> PyResult<BoxliteOptions> {
         let mut config = BoxliteOptions::default();
 
-        if let Some(home_dir) = py_opts.home_dir {
+        if let Some(home_dir) = self.home_dir {
             config.home_dir = PathBuf::from(home_dir);
         }
 
-        config.image_registries = py_opts.image_registries;
+        config.image_registries = self
+            .image_registries
+            .into_iter()
+            .map(PyImageRegistry::into_core)
+            .collect::<PyResult<Vec<_>>>()?;
 
-        config
+        Ok(config)
     }
+}
+
+#[pyclass(name = "ImageRegistry")]
+#[derive(Clone)]
+pub(crate) struct PyImageRegistry {
+    #[pyo3(get, set)]
+    pub(crate) host: String,
+    #[pyo3(get, set)]
+    pub(crate) transport: String,
+    #[pyo3(get, set)]
+    pub(crate) skip_verify: bool,
+    #[pyo3(get, set)]
+    pub(crate) search: bool,
+    #[pyo3(get, set)]
+    pub(crate) username: Option<String>,
+    #[pyo3(get, set)]
+    pub(crate) password: Option<String>,
+    #[pyo3(get, set)]
+    pub(crate) bearer_token: Option<String>,
+}
+
+impl std::fmt::Debug for PyImageRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageRegistry")
+            .field("host", &self.host)
+            .field("transport", &self.transport)
+            .field("skip_verify", &self.skip_verify)
+            .field("search", &self.search)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "***"))
+            .field("bearer_token", &self.bearer_token.as_ref().map(|_| "***"))
+            .finish()
+    }
+}
+
+#[pymethods]
+impl PyImageRegistry {
+    #[new]
+    #[pyo3(signature = (
+        host,
+        transport = "https".to_string(),
+        skip_verify = false,
+        search = false,
+        username = None,
+        password = None,
+        bearer_token = None
+    ))]
+    fn new(
+        host: String,
+        transport: String,
+        skip_verify: bool,
+        search: bool,
+        username: Option<String>,
+        password: Option<String>,
+        bearer_token: Option<String>,
+    ) -> PyResult<Self> {
+        validate_registry_host(&host)?;
+        parse_registry_transport(&transport)?;
+        validate_registry_auth(&username, &password)?;
+
+        Ok(Self {
+            host,
+            transport,
+            skip_verify,
+            search,
+            username,
+            password,
+            bearer_token,
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ImageRegistry(host={:?}, transport={:?}, skip_verify={}, search={})",
+            self.host, self.transport, self.skip_verify, self.search
+        )
+    }
+}
+
+impl PyImageRegistry {
+    fn into_core(self) -> PyResult<ImageRegistry> {
+        validate_registry_host(&self.host)?;
+        let transport = parse_registry_transport(&self.transport)?;
+        validate_registry_auth(&self.username, &self.password)?;
+
+        let auth = if let Some(token) = self.bearer_token {
+            ImageRegistryAuth::Bearer { token }
+        } else if let (Some(username), Some(password)) = (self.username, self.password) {
+            ImageRegistryAuth::Basic { username, password }
+        } else {
+            ImageRegistryAuth::Anonymous
+        };
+
+        Ok(ImageRegistry {
+            host: self.host,
+            transport,
+            skip_verify: self.skip_verify,
+            search: self.search,
+            auth,
+        })
+    }
+}
+
+fn validate_registry_host(host: &str) -> PyResult<()> {
+    if host.trim().is_empty() {
+        return Err(PyRuntimeError::new_err("image registry host is required"));
+    }
+    if host.contains("://") || host.contains('/') {
+        return Err(PyRuntimeError::new_err(format!(
+            "image registry host must be host[:port], not a URL: {host}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_registry_transport(transport: &str) -> PyResult<RegistryTransport> {
+    match transport {
+        "" | "https" => Ok(RegistryTransport::Https),
+        "http" => Ok(RegistryTransport::Http),
+        _ => Err(PyRuntimeError::new_err(format!(
+            "unsupported registry transport: {transport}"
+        ))),
+    }
+}
+
+fn validate_registry_auth(username: &Option<String>, password: &Option<String>) -> PyResult<()> {
+    if username.is_some() != password.is_some() {
+        return Err(PyRuntimeError::new_err(
+            "registry username and password must be provided together",
+        ));
+    }
+    Ok(())
 }
 
 // ============================================================================
