@@ -280,6 +280,7 @@ jobs:
           apt-get update -qq && apt-get install -y -qq make sudo
           make setup
           source "$HOME/.cargo/env"
+          export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
           make test:integration
 
   # =========================================================================
