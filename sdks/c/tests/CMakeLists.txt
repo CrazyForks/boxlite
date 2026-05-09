@@ -30,18 +30,13 @@ endif()
 # Include directories
 include_directories(${BOXLITE_INCLUDE_DIR})
 
-# Test executables
+# Test executables.
+# Note: lifecycle/execute/streaming/etc. tests were removed when the C SDK
+# moved to the post-and-drain callback API; coverage of those code paths now
+# lives in the Go SDK + runner integration suite.
 set(TEST_TARGETS
-    test_basic
-    test_lifecycle
-    test_execute
-    test_errors
-    test_images
     test_simple_api
-    test_streaming
-    test_memory
-    test_integration
-    test_execute_cmd
+    test_null_callback
 )
 
 foreach(TARGET ${TEST_TARGETS})
@@ -71,17 +66,11 @@ foreach(TARGET ${TEST_TARGETS})
     add_test(NAME ${TARGET} COMMAND ${TARGET})
 endforeach()
 
-# Label unit tests (no VM required)
-set_tests_properties(test_basic PROPERTIES LABELS "unit")
-
 # Label integration tests (require VM)
-set(INTEGRATION_TESTS
-    test_lifecycle test_execute test_errors test_images test_simple_api
-    test_streaming test_memory test_integration test_execute_cmd
-)
-foreach(TARGET ${INTEGRATION_TESTS})
-    set_tests_properties(${TARGET} PROPERTIES LABELS "integration")
-endforeach()
+set_tests_properties(test_simple_api PROPERTIES LABELS "integration")
+# test_null_callback only exercises the FFI argument-validation path;
+# no VM is required, but we still link the runtime dylib.
+set_tests_properties(test_null_callback PROPERTIES LABELS "ffi")
 
 message(STATUS "BoxLite C Tests Configuration:")
 message(STATUS "  Include dir: ${BOXLITE_INCLUDE_DIR}")

@@ -1279,12 +1279,11 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", runtime_dir.display());
 
     // libkrun is a Rust staticlib that embeds its own copy of std.
-    // When linked into Rust test/bin targets, std symbols conflict.
-    // Applied to both test and bin targets.
+    // When linked into integration test binaries (src/boxlite/tests/), std
+    // symbols conflict; --allow-multiple-definition lets the linker pick one.
+    // The shim binary needs the same flag — emitted from src/shim/build.rs.
     #[cfg(target_os = "linux")]
     println!("cargo:rustc-link-arg-tests=-Wl,--allow-multiple-definition");
-    #[cfg(target_os = "linux")]
-    println!("cargo:rustc-link-arg-bins=-Wl,--allow-multiple-definition");
 
     // Expose the runtime directory to downstream crates (e.g., Python SDK)
     println!("cargo:runtime_dir={}", runtime_dir.display());
@@ -1295,10 +1294,4 @@ fn main() {
 
     // Generate embedded runtime manifest (include_bytes! for self-contained SDKs)
     EmbeddedManifest::new(&runtime_dir).generate(&mode, &cargo);
-
-    // Set rpath for boxlite-shim
-    #[cfg(target_os = "macos")]
-    println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
-    #[cfg(target_os = "linux")]
-    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
 }
