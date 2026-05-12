@@ -2,6 +2,7 @@
 # BoxLite CLI installer.
 #
 # Usage:
+#   curl -fsSL https://sh.boxlite.ai | sh
 #   curl -fsSL https://github.com/boxlite-ai/boxlite/releases/latest/download/install.sh | sh
 #
 # Environment variables:
