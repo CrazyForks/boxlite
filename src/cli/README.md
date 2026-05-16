@@ -120,6 +120,23 @@ boxlite pull alpine:latest
 boxlite images
 ```
 
+## Connecting to a remote server
+
+To target a remote BoxLite REST server instead of the local runtime, sign in with `boxlite auth login`. Credential precedence is **env vars > stored file > unauthenticated** (local runtime). The `--url` flag overrides the URL specifically without affecting credentials.
+
+```bash
+# Interactive
+boxlite auth login
+
+# CI / scripted (API key from stdin)
+echo "$KEY" | boxlite auth login --api-key-stdin --url https://<your-server>
+
+# CI via env vars only
+BOXLITE_API_KEY=$KEY BOXLITE_REST_URL=https://<your-server> boxlite list
+```
+
+Credentials are stored at `~/.boxlite/credentials.toml` (perms `0600`).
+
 ## Commands Reference
 
 > For an exhaustive man-page-style reference (shared flag groups, volume/port grammar,
@@ -136,6 +153,54 @@ Available for all commands:
 | `--home PATH` | BoxLite home directory (default: `~/.boxlite`). Overridden by `BOXLITE_HOME` |
 | `--registry REGISTRY` | Image registry (repeatable; prepended to config) |
 | `--config PATH` | JSON config file path (e.g. for `image_registries`) |
+
+### `boxlite auth login`
+
+Log in to a BoxLite REST server using a dashboard-issued opaque API key.
+Long-lived and org-scoped — good for CI, server-side automation, and SDK
+integrations. Credentials are stored at `~/.boxlite/credentials.toml`
+(perms `0600`).
+
+**Usage:** `boxlite auth login [OPTIONS]`
+
+| Option | Description |
+|--------|-------------|
+| `--url URL` | Server URL (default: `http://localhost:8100`, matching `boxlite serve`) |
+| `--api-key-stdin` | Read the API key from stdin (one line). The flag takes no value, so the secret never appears on argv |
+
+**Examples:**
+
+```bash
+# Interactive — prompts for the API key with hidden input
+boxlite auth login
+
+# API key from stdin (CI-friendly; nothing on argv)
+echo "$KEY" | boxlite auth login --api-key-stdin --url https://<your-server>
+```
+
+### `boxlite auth logout`
+
+Remove stored credentials at `~/.boxlite/credentials.toml`. Prompts for confirmation unless `--yes` is given.
+
+**Usage:** `boxlite auth logout [OPTIONS]`
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--yes` | `-y` | Skip the confirmation prompt |
+
+### `boxlite auth status`
+
+Print the current authentication state: the logged-in URL and the source
+(stored file vs env var). The secret material is never printed.
+
+**Usage:** `boxlite auth status`
+
+**Example output:**
+
+```
+Logged in to:    http://localhost:8100
+Credential:      API key (from ~/.boxlite/credentials.toml)
+```
 
 ### `boxlite run`
 
@@ -362,6 +427,7 @@ Then reload your shell or source the file.
 | Variable | Description |
 |----------|-------------|
 | `BOXLITE_HOME` | Runtime home directory (default: `~/.boxlite`). Overridden by `--home`. |
+| `BOXLITE_API_KEY` | Long-lived API key sent as `Authorization: Bearer`. Overrides any stored credentials. |
 | `RUST_LOG` | Log level: `trace`, `debug`, `info`, `warn`, `error`. Use `RUST_LOG=debug` for troubleshooting. |
 
 ## Configuration file

@@ -30,25 +30,6 @@ pub(crate) struct ErrorModel {
 }
 
 // ============================================================================
-// Authentication
-// ============================================================================
-
-#[derive(Debug, Serialize)]
-pub(crate) struct TokenRequest<'a> {
-    pub grant_type: &'a str,
-    pub client_id: &'a str,
-    pub client_secret: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct TokenResponse {
-    pub access_token: String,
-    #[allow(dead_code)]
-    pub token_type: String,
-    pub expires_in: u64,
-}
-
-// ============================================================================
 // Configuration
 // ============================================================================
 
@@ -600,7 +581,7 @@ mod tests {
 
     #[test]
     fn test_box_response_to_box_info_uuid() {
-        // Servers (e.g. dev.boxlite.ai) may return UUIDs as box_id.
+        // Some servers may return UUIDs as box_id (not just 12-char Base62 / 26-char ULID).
         // Verify the SDK accepts them and round-trips the id verbatim.
         let resp = BoxResponse {
             box_id: "d406c59d-eb09-4bc3-9b3a-62455c7e8f32".to_string(),

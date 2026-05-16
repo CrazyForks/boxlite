@@ -98,6 +98,9 @@ pub enum Commands {
     /// Start a long-running REST API server
     Serve(crate::commands::serve::ServeArgs),
 
+    /// Authenticate with a remote BoxLite server
+    Auth(crate::commands::auth::AuthArgs),
+
     /// Generate shell completion script (hidden from help)
     #[command(hide = true)]
     Completion(CompletionArgs),
@@ -192,12 +195,38 @@ impl GlobalFlags {
     }
 
     pub fn create_runtime(&self) -> anyhow::Result<BoxliteRuntime> {
-        if let Some(ref url) = self.url {
-            let opts = BoxliteRestOptions::new(url);
-            return BoxliteRuntime::rest(opts).map_err(Into::into);
+        // URL precedence: --url / BOXLITE_REST_URL (the clap flag covers both) > stored profile > none.
+        // Credential precedence: BOXLITE_API_KEY env > stored profile > none.
+        // Clap reads BOXLITE_REST_URL into `self.url`, so we don't re-check env here.
+        let stored = crate::credentials::load().ok().flatten();
+
+        let url = self
+            .url
+            .clone()
+            .or_else(|| stored.as_ref().map(|p| p.url.clone()));
+
+        let Some(url) = url else {
+            // No URL anywhere → local runtime, unchanged behavior.
+            let options = self.resolve_runtime_options()?;
+            return self.create_runtime_with_options(options);
+        };
+
+        let mut opts = BoxliteRestOptions::new(url);
+
+        // BOXLITE_API_KEY env beats stored credentials of any kind.
+        if let Ok(key) = std::env::var("BOXLITE_API_KEY")
+            && !key.is_empty()
+        {
+            opts = opts.with_api_key(key);
+        } else if let Some(profile) = stored {
+            opts = crate::credentials::into_rest_options(profile);
+            // The conversion above also sets the URL from the profile; the
+            // caller's --url already won via the precedence check above, so
+            // re-apply it to make sure it wins over the stored URL.
+            opts.url = self.url.clone().unwrap_or(opts.url);
         }
-        let options = self.resolve_runtime_options()?;
-        self.create_runtime_with_options(options)
+
+        BoxliteRuntime::rest(opts).map_err(Into::into)
     }
 }
 
@@ -908,5 +937,52 @@ mod tests {
         assert_eq!(opts.volumes[1].guest_path, "/cache");
         assert!(opts.volumes[1].read_only);
         assert!(opts.volumes[1].host_path.contains("anonymous"));
+    }
+
+    // ─── auth subcommand parse tests ───────────────────────────────────────
+
+    use crate::commands::auth::AuthCommand;
+    use clap::Parser;
+
+    #[test]
+    fn auth_login_parses_with_no_flags() {
+        let cli = Cli::try_parse_from(["boxlite", "auth", "login"]).expect("parse");
+        let Commands::Auth(args) = cli.command else {
+            panic!("expected Commands::Auth");
+        };
+        assert!(matches!(args.command, AuthCommand::Login(_)));
+    }
+
+    #[test]
+    fn auth_logout_parses() {
+        let cli = Cli::try_parse_from(["boxlite", "auth", "logout"]).expect("parse");
+        let Commands::Auth(args) = cli.command else {
+            panic!("expected Commands::Auth");
+        };
+        assert!(matches!(args.command, AuthCommand::Logout(_)));
+    }
+
+    #[test]
+    fn auth_status_parses() {
+        let cli = Cli::try_parse_from(["boxlite", "auth", "status"]).expect("parse");
+        let Commands::Auth(args) = cli.command else {
+            panic!("expected Commands::Auth");
+        };
+        assert!(matches!(args.command, AuthCommand::Status));
+    }
+
+    #[test]
+    fn auth_login_api_key_stdin_parses() {
+        // --api-key-stdin is the only non-interactive credential path
+        // after the device-flow removal; it must parse cleanly.
+        let cli = Cli::try_parse_from(["boxlite", "auth", "login", "--api-key-stdin"])
+            .expect("--api-key-stdin should parse");
+        let Commands::Auth(args) = cli.command else {
+            panic!("expected Commands::Auth");
+        };
+        let AuthCommand::Login(login) = args.command else {
+            panic!("expected AuthCommand::Login");
+        };
+        assert!(login.api_key_stdin);
     }
 }

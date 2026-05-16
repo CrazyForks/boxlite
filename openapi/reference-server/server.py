@@ -13,8 +13,8 @@
 """
 BoxLite REST API Reference Server
 
-Reference implementation of the BoxLite Cloud Sandbox REST API.
-Implements the OpenAPI spec at ../rest-sandbox-open-api.yaml.
+Reference implementation of the BoxLite Box API.
+Implements the OpenAPI spec at ../box.openapi.yaml.
 
 Purpose: showcase the API and validate client implementations.
 NOT production-ready — no persistence, no real auth, single-tenant.
@@ -261,29 +261,31 @@ def error_response(status: int, message: str, error_type: str) -> JSONResponse:
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def create_token(client_id: str, scopes: str = "") -> dict:
-    config = get_server_config()
-    now = time.time()
-    payload = {
-        "sub": client_id,
-        "iat": now,
-        "exp": now + config.jwt_expiry_seconds,
-        "scope": scopes
-        or "boxes:read boxes:write boxes:exec images:read images:write runtime:admin",
-    }
-    token = jwt.encode(payload, config.jwt_secret, algorithm=JWT_ALGORITHM)
-    return {
-        "access_token": token,
-        "token_type": "bearer",
-        "expires_in": config.jwt_expiry_seconds,
-        "scope": payload["scope"],
-    }
+# --- Auth: format-agnostic Bearer acceptance ---
+#
+# The reference server accepts ANY non-empty Bearer token. Real validation
+# is the production gateway's job (see plan §9 — pluggable validators).
+
+LOCAL_PRINCIPAL = {
+    "sub": "local-anonymous",
+    "principal_type": "service_account",
+    "email": "local@boxlite.local",
+    "display_name": "Local development",
+    "prefix": "default",
+    "scopes": [
+        "box:read", "box:write", "box:exec", "box:delete",
+        "image:read", "image:write",
+        "snapshot:read", "snapshot:write", "snapshot:delete",
+        "me:read",
+    ],
+    "expires_at": None,
+}
 
 
 async def require_auth(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> dict:
-    if credentials is None:
+    if credentials is None or not credentials.credentials:
         raise HTTPException(
             status_code=401,
             detail={
@@ -294,34 +296,9 @@ async def require_auth(
                 }
             },
         )
-    try:
-        config = get_server_config()
-        payload = jwt.decode(
-            credentials.credentials, config.jwt_secret, algorithms=[JWT_ALGORITHM]
-        )
-        return payload
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "message": "token expired",
-                    "type": "UnauthorizedError",
-                    "code": 401,
-                }
-            },
-        )
-    except jwt.InvalidTokenError:
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": {
-                    "message": "invalid token",
-                    "type": "UnauthorizedError",
-                    "code": 401,
-                }
-            },
-        )
+    # Format-agnostic: any non-empty bearer is accepted. The full server
+    # validates against its issuance store; this reference server doesn't.
+    return {"sub": "local-anonymous"}
 
 
 # ============================================================================
@@ -510,7 +487,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="BoxLite Cloud Sandbox REST API",
+    title="BoxLite Box API",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -559,22 +536,10 @@ async def get_config():
     }
 
 
-@app.post("/v1/oauth/tokens")
-async def get_token(request: Request):
-    config = get_server_config()
-    body = await request.form()
-    grant_type = body.get("grant_type")
-    client_id = body.get("client_id")
-    client_secret = body.get("client_secret")
-    scope = body.get("scope", "")
-
-    if grant_type != "client_credentials":
-        return error_response(400, "unsupported grant_type", "InvalidArgumentError")
-
-    if client_id != config.client_id or client_secret != config.client_secret:
-        return error_response(401, "invalid client credentials", "UnauthorizedError")
-
-    return create_token(client_id, scope)
+@app.get("/v1/me")
+async def get_me(_auth: dict = Depends(require_auth)):
+    """Identity + scopes for the calling credential."""
+    return LOCAL_PRINCIPAL
 
 
 # ============================================================================

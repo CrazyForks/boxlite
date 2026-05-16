@@ -1,6 +1,7 @@
-//! HTTP client with OAuth2 token management.
+//! HTTP client for the BoxLite REST API.
 
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde::Serialize;
@@ -9,29 +10,29 @@ use tokio::sync::RwLock;
 
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 
+use super::credential::{AccessToken, Credential};
 use super::error::{map_http_error, map_http_status};
 use super::options::BoxliteRestOptions;
-use super::types::{ErrorResponse, SandboxConfigResponse, TokenRequest, TokenResponse};
+use super::types::{ErrorResponse, SandboxConfigResponse};
 
-/// Cached OAuth2 token with expiry.
-struct TokenCache {
-    token: String,
-    /// Expiry as seconds since epoch.
-    expires_at: u64,
-}
+/// Re-request a token once it is within this leeway of `expires_at`.
+const REFRESH_LEEWAY: Duration = Duration::from_secs(60);
 
 /// HTTP client for the BoxLite REST API.
 ///
-/// Handles base URL construction, OAuth2 token caching/refresh,
+/// Handles base URL construction, bearer auth (any [`Credential`] impl),
 /// and error response parsing.
 #[derive(Clone)]
 pub(crate) struct ApiClient {
     http: Client,
     base_url: String,
     prefix: String,
-    client_id: Option<String>,
-    client_secret: Option<String>,
-    token_cache: Arc<RwLock<Option<TokenCache>>>,
+    /// Bearer credential. `None` = unauthenticated.
+    credential: Option<Arc<dyn Credential>>,
+    /// Last token fetched, cached until near expiry. Generic over any
+    /// `Credential` impl — API keys (`expires_at == None`) are fetched
+    /// once and cached forever.
+    cached: Arc<RwLock<Option<AccessToken>>>,
     config_cache: Arc<RwLock<Option<SandboxConfigResponse>>>,
 }
 
@@ -49,9 +50,8 @@ impl ApiClient {
             http,
             base_url,
             prefix,
-            client_id: config.client_id.clone(),
-            client_secret: config.client_secret.clone(),
-            token_cache: Arc::new(RwLock::new(None)),
+            credential: config.credential.clone(),
+            cached: Arc::new(RwLock::new(None)),
             config_cache: Arc::new(RwLock::new(None)),
         })
     }
@@ -67,81 +67,37 @@ impl ApiClient {
         format!("{}/{}{}", self.base_url, self.prefix, path)
     }
 
-    /// Get a valid Bearer token, refreshing if needed.
-    pub(crate) async fn get_token(&self) -> BoxliteResult<Option<String>> {
-        let (client_id, client_secret) = match (&self.client_id, &self.client_secret) {
-            (Some(id), Some(secret)) => (id.clone(), secret.clone()),
-            _ => return Ok(None),
+    /// Return a usable bearer, re-requesting from the credential when the
+    /// cached token is absent or within [`REFRESH_LEEWAY`] of `expires_at`.
+    /// `expires_at == None` (API keys) → fetched once, cached forever.
+    /// `None` means the client has no credential configured.
+    async fn current_bearer(&self) -> BoxliteResult<Option<String>> {
+        let Some(cred) = &self.credential else {
+            return Ok(None);
         };
-
-        // Check cached token
         {
-            let cache = self.token_cache.read().await;
-            if let Some(ref cached) = *cache {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                // Refresh 60 seconds before expiry
-                if now + 60 < cached.expires_at {
-                    return Ok(Some(cached.token.clone()));
+            let guard = self.cached.read().await;
+            if let Some(tok) = guard.as_ref() {
+                let fresh = match tok.expires_at {
+                    None => true,
+                    Some(exp) => SystemTime::now() + REFRESH_LEEWAY < exp,
+                };
+                if fresh {
+                    return Ok(Some(tok.token.clone()));
                 }
             }
         }
-
-        // Refresh token
-        let token_url = self.url_root("/oauth/tokens");
-        let req = TokenRequest {
-            grant_type: "client_credentials",
-            client_id: &client_id,
-            client_secret: &client_secret,
-        };
-
-        let resp = self
-            .http
-            .post(&token_url)
-            .form(&req)
-            .send()
-            .await
-            .map_err(|e| BoxliteError::Config(format!("token request failed: {}", e)))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(BoxliteError::Config(format!(
-                "token exchange failed (HTTP {}): {}",
-                status, text
-            )));
-        }
-
-        let token_resp: TokenResponse = resp
-            .json()
-            .await
-            .map_err(|e| BoxliteError::Config(format!("failed to parse token response: {}", e)))?;
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let token = token_resp.access_token.clone();
-        let expires_at = now + token_resp.expires_in;
-
-        let mut cache = self.token_cache.write().await;
-        *cache = Some(TokenCache {
-            token: token.clone(),
-            expires_at,
-        });
-
-        Ok(Some(token))
+        let tok = cred.get_token().await?;
+        let bearer = tok.token.clone();
+        *self.cached.write().await = Some(tok);
+        Ok(Some(bearer))
     }
 
     /// Add auth header to a request builder.
     async fn authorize(&self, builder: RequestBuilder) -> BoxliteResult<RequestBuilder> {
-        if let Some(token) = self.get_token().await? {
-            Ok(builder.bearer_auth(token))
-        } else {
-            Ok(builder)
+        match self.current_bearer().await? {
+            Some(bearer) => Ok(builder.bearer_auth(bearer)),
+            None => Ok(builder),
         }
     }
 
@@ -284,7 +240,7 @@ impl ApiClient {
 
     /// Open an authenticated WebSocket connection at the given REST path.
     ///
-    /// Translates the http(s) URL to ws(s), attaches the OAuth2 Bearer header
+    /// Translates the http(s) URL to ws(s), attaches the Bearer header
     /// when configured, and returns the upgraded stream.
     pub(crate) async fn connect_ws(
         &self,
@@ -314,8 +270,8 @@ impl ApiClient {
             .into_client_request()
             .map_err(|e| BoxliteError::Internal(format!("WS request build failed: {}", e)))?;
 
-        if let Some(token) = self.get_token().await? {
-            let value = HeaderValue::from_str(&format!("Bearer {}", token))
+        if let Some(bearer) = self.current_bearer().await? {
+            let value = HeaderValue::from_str(&format!("Bearer {}", bearer))
                 .map_err(|e| BoxliteError::Internal(format!("WS auth header invalid: {}", e)))?;
             request.headers_mut().insert("Authorization", value);
         }
@@ -456,7 +412,80 @@ fn ensure_capability(name: &str, enabled: Option<bool>) -> BoxliteResult<()> {
 #[cfg(test)]
 mod tests {
     use super::ensure_capability;
+    use super::*;
+    use crate::rest::credential::{AccessToken, Credential};
+    use async_trait::async_trait;
     use boxlite_shared::errors::BoxliteError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Rotating credential with a finite expiry already in the past, so
+    /// `current_bearer` must re-request on every call. Proves the cache
+    /// is expiry-driven and works for any `Credential` impl, not just
+    /// `ApiKeyCredential`.
+    #[derive(Debug)]
+    struct RotatingMock {
+        calls: AtomicUsize,
+        /// When false, behaves like an API key (`expires_at: None`).
+        expiring: bool,
+    }
+
+    #[async_trait]
+    impl Credential for RotatingMock {
+        async fn get_token(&self) -> BoxliteResult<AccessToken> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AccessToken {
+                token: format!("tok-{n}"),
+                // Past instant → always within leeway → always re-fetch.
+                expires_at: self
+                    .expiring
+                    .then(|| SystemTime::now() - Duration::from_secs(3600)),
+            })
+        }
+    }
+
+    fn client_with(cred: Arc<dyn Credential>) -> ApiClient {
+        let opts = BoxliteRestOptions::new("http://localhost:1").with_credential(cred);
+        ApiClient::new(&opts).expect("client")
+    }
+
+    #[tokio::test]
+    async fn expiring_credential_is_re_requested_each_call() {
+        let mock = Arc::new(RotatingMock {
+            calls: AtomicUsize::new(0),
+            expiring: true,
+        });
+        let client = client_with(mock.clone());
+        let a = client.current_bearer().await.unwrap();
+        let b = client.current_bearer().await.unwrap();
+        assert_eq!(a.as_deref(), Some("tok-0"));
+        assert_eq!(b.as_deref(), Some("tok-1"), "expired token must rotate");
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn non_expiring_credential_is_fetched_once() {
+        let mock = Arc::new(RotatingMock {
+            calls: AtomicUsize::new(0),
+            expiring: false,
+        });
+        let client = client_with(mock.clone());
+        let a = client.current_bearer().await.unwrap();
+        let b = client.current_bearer().await.unwrap();
+        assert_eq!(a.as_deref(), Some("tok-0"));
+        assert_eq!(b.as_deref(), Some("tok-0"), "API-key token must cache");
+        assert_eq!(
+            mock.calls.load(Ordering::SeqCst),
+            1,
+            "expires_at=None must be fetched exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_credential_yields_no_bearer() {
+        let opts = BoxliteRestOptions::new("http://localhost:1");
+        let client = ApiClient::new(&opts).expect("client");
+        assert_eq!(client.current_bearer().await.unwrap(), None);
+    }
 
     #[test]
     fn test_ensure_capability_enabled() {

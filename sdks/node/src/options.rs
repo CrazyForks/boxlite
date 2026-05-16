@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use boxlite::BoxliteRestOptions;
 use boxlite::runtime::advanced_options::{AdvancedBoxOptions, HealthCheckOptions, SecurityOptions};
 use boxlite::runtime::constants::images;
 use boxlite::runtime::options::{
@@ -432,29 +431,58 @@ impl TryFrom<JsBoxOptions> for BoxOptions {
     }
 }
 
-/// REST backend configuration options.
+/// A bearer token plus its expiry. Mirrors the Rust `AccessToken`.
+/// `expiresAt` is epoch seconds, or `null` for non-expiring tokens
+/// (e.g. API keys).
 #[napi(object)]
-#[derive(Clone, Debug)]
-pub struct JsBoxliteRestOptions {
-    /// REST API base URL.
-    pub url: String,
-    /// OAuth2 client ID (optional).
-    #[napi(js_name = "clientId")]
-    pub client_id: Option<String>,
-    /// OAuth2 client secret (optional).
-    #[napi(js_name = "clientSecret")]
-    pub client_secret: Option<String>,
-    /// URL path prefix (optional).
-    pub prefix: Option<String>,
+#[derive(Clone)]
+pub struct JsAccessToken {
+    pub token: String,
+    #[napi(js_name = "expiresAt")]
+    pub expires_at: Option<f64>,
 }
 
-impl From<JsBoxliteRestOptions> for BoxliteRestOptions {
-    fn from(js_opts: JsBoxliteRestOptions) -> Self {
-        let mut opts = BoxliteRestOptions::new(js_opts.url);
-        opts.client_id = js_opts.client_id;
-        opts.client_secret = js_opts.client_secret;
-        opts.prefix = js_opts.prefix;
-        opts
+/// Long-lived opaque API key credential.
+///
+/// Concrete implementation of the `Credential` interface (see
+/// `lib/credential.ts`). Pass an instance to `Boxlite.rest(url, credential)`.
+#[napi]
+#[derive(Clone)]
+pub struct ApiKeyCredential {
+    key: String,
+}
+
+#[napi]
+impl ApiKeyCredential {
+    #[napi(constructor)]
+    pub fn new(key: String) -> Self {
+        Self { key }
+    }
+
+    /// Build from `BOXLITE_API_KEY`. Returns `null` when unset/empty.
+    #[napi]
+    pub fn from_env() -> Option<ApiKeyCredential> {
+        std::env::var("BOXLITE_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty())
+            .map(|key| Self { key })
+    }
+
+    /// Return the bearer token. API keys never expire (`expiresAt` is
+    /// `null`); the SDK core fetches once and caches.
+    #[napi]
+    pub fn get_token(&self) -> JsAccessToken {
+        JsAccessToken {
+            token: self.key.clone(),
+            expires_at: None,
+        }
+    }
+}
+
+impl ApiKeyCredential {
+    /// Crate-internal accessor for the conversion in `runtime::rest`.
+    pub(crate) fn core_key(&self) -> &str {
+        &self.key
     }
 }
 
@@ -567,33 +595,23 @@ mod tests {
     }
 
     #[test]
-    fn rest_options_from_js_all_fields() {
-        let js = JsBoxliteRestOptions {
-            url: "https://api.example.com".into(),
-            client_id: Some("cid".into()),
-            client_secret: Some("csec".into()),
-            prefix: Some("/v1".into()),
-        };
-        let opts: BoxliteRestOptions = js.into();
-        assert_eq!(opts.url, "https://api.example.com");
-        assert_eq!(opts.client_id.as_deref(), Some("cid"));
-        assert_eq!(opts.client_secret.as_deref(), Some("csec"));
-        assert_eq!(opts.prefix.as_deref(), Some("/v1"));
+    fn api_key_credential_get_token() {
+        let cred = ApiKeyCredential::new("opaque-key".into());
+        let tok = cred.get_token();
+        assert_eq!(tok.token, "opaque-key");
+        // API keys never expire.
+        assert!(tok.expires_at.is_none());
+        assert_eq!(cred.core_key(), "opaque-key");
     }
 
     #[test]
-    fn rest_options_from_js_url_only() {
-        let js = JsBoxliteRestOptions {
-            url: "https://api.example.com".into(),
-            client_id: None,
-            client_secret: None,
-            prefix: None,
-        };
-        let opts: BoxliteRestOptions = js.into();
-        assert_eq!(opts.url, "https://api.example.com");
-        assert!(opts.client_id.is_none());
-        assert!(opts.client_secret.is_none());
-        assert!(opts.prefix.is_none());
+    fn api_key_credential_from_env() {
+        // SAFETY: single-threaded test; no other test reads this var.
+        unsafe { std::env::set_var("BOXLITE_API_KEY", "env-key") };
+        let cred = ApiKeyCredential::from_env().expect("from_env");
+        assert_eq!(cred.get_token().token, "env-key");
+        unsafe { std::env::remove_var("BOXLITE_API_KEY") };
+        assert!(ApiKeyCredential::from_env().is_none());
     }
 
     #[test]
