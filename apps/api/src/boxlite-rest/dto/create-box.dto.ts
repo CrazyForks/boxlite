@@ -4,7 +4,28 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
-import { IsOptional, IsString, IsNumber, IsBoolean, IsObject, IsArray, Min } from 'class-validator'
+import { Type } from 'class-transformer'
+import {
+  IsOptional,
+  IsString,
+  IsNumber,
+  IsBoolean,
+  IsObject,
+  IsArray,
+  Min,
+  IsIn,
+  ValidateNested,
+} from 'class-validator'
+
+export class NetworkSpecDto {
+  @IsIn(['enabled', 'disabled'])
+  mode: 'enabled' | 'disabled'
+
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  allow_net?: string[]
+}
 
 export class CreateBoxDto {
   @IsOptional()
@@ -60,4 +81,9 @@ export class CreateBoxDto {
   @IsOptional()
   @IsBoolean()
   detach?: boolean
+
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => NetworkSpecDto)
+  network?: NetworkSpecDto
 }
