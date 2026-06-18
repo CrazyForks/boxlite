@@ -1,17 +1,13 @@
-// Minimal Go SDK e2e smoke driver, called by cases/test_go_entry.py.
-//
-// Reads connection settings from env (BOXLITE_E2E_URL / API_KEY / PREFIX /
-// IMAGE), creates a box via the REST runtime, exec's `echo HELLO-FROM-GO`,
-// prints the box id + captured stdout, and removes the box.
-//
-// Exit code 0 on success. The pytest wrapper parses stdout for the box
-// id and stdout marker, and cross-checks the runner journal.
+// Go SDK e2e: exec with working dir + env vars.
+// Called by cases/test_go_coverage.py.
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/boxlite-ai/boxlite/sdks/go"
 )
@@ -50,20 +46,31 @@ func main() {
 		die("Create: %v", err)
 	}
 	fmt.Printf("BOX_ID=%s\n", box.ID())
-
-	result, err := box.Exec(ctx, "echo", "HELLO-FROM-GO")
-	if err != nil {
+	defer func() {
 		_ = rt.Remove(ctx, box.ID())
-		die("Exec: %v", err)
-	}
-	fmt.Printf("EXIT_CODE=%d\n", result.ExitCode)
-	fmt.Printf("STDOUT=%s", result.Stdout)
+	}()
 
-	if err := rt.Remove(ctx, box.ID()); err != nil {
-		fmt.Fprintf(os.Stderr, "Remove (best-effort): %v\n", err)
+	// 1. exec pwd with working dir /tmp
+	cmd1 := box.Command("pwd")
+	cmd1.Dir = "/tmp"
+	var out1 bytes.Buffer
+	cmd1.Stdout = &out1
+	if err := cmd1.Run(ctx); err != nil {
+		die("pwd with Dir=/tmp: %v", err)
 	}
+	cwd := strings.TrimSpace(out1.String())
+	fmt.Printf("CWD_OUTPUT=%s\n", cwd)
 
-	if result.ExitCode != 0 {
-		die("exec exit_code=%d", result.ExitCode)
+	// 2. exec printenv with custom env
+	cmd2 := box.Command("printenv", "MY_KEY")
+	cmd2.Env = map[string]string{"MY_KEY": "MY_VALUE"}
+	var out2 bytes.Buffer
+	cmd2.Stdout = &out2
+	if err := cmd2.Run(ctx); err != nil {
+		die("printenv MY_KEY: %v", err)
 	}
+	envVal := strings.TrimSpace(out2.String())
+	fmt.Printf("ENV_VALUE=%s\n", envVal)
+
+	fmt.Println("OK")
 }
