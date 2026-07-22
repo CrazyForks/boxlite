@@ -315,6 +315,10 @@ pub struct BoxInfo {
 
     /// Health status.
     pub health_status: HealthStatus,
+
+    /// Exit code of the container's init process, when the box stopped
+    /// because its main command exited (docker semantics).
+    pub exit_code: Option<i32>,
 }
 
 impl BoxInfo {
@@ -338,6 +342,7 @@ impl BoxInfo {
             memory_mib: config.options.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB),
             labels: HashMap::new(),
             health_status: state.health_status,
+            exit_code: state.exit_code,
         }
     }
 }
@@ -374,6 +379,9 @@ pub struct BoxStateInfo {
 
     /// Process ID of the VMM subprocess (None if not running).
     pub pid: Option<u32>,
+
+    /// Init exit code, when the box stopped because its command exited.
+    pub exit_code: Option<i32>,
 }
 
 impl BoxStateInfo {
@@ -383,6 +391,7 @@ impl BoxStateInfo {
             status: state.status,
             running: state.status.is_running(),
             pid: state.pid,
+            exit_code: state.exit_code,
         }
     }
 }
@@ -395,6 +404,7 @@ impl From<&BoxInfo> for BoxStateInfo {
             status: info.status,
             running: info.status.is_running(),
             pid: info.pid,
+            exit_code: info.exit_code,
         }
     }
 }

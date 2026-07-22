@@ -16,6 +16,7 @@ mod network;
 mod snapshot;
 pub(crate) mod snapshot_mgr;
 mod state;
+mod watcher;
 
 pub use copy::CopyOptions;
 pub(crate) use crash_report::CrashReport;
@@ -104,13 +105,22 @@ impl LiteBox {
         self.box_backend.exec(command).await
     }
 
-    /// Reattach to a running execution by id, returning a fresh
-    /// `Execution` handle. The caller discards any previous handle for
-    /// the same id. Used after a transient WebSocket drop to resume
-    /// stdio without restarting the underlying process. Returns
-    /// `BoxliteError::SessionReaped` if the session is no longer
-    /// attachable on the server side.
-    pub async fn attach(&self, execution_id: &str) -> BoxliteResult<Execution> {
+    /// Attach to a session in the box.
+    ///
+    /// - `None` — the box's main command session (`run IMAGE COMMAND` runs
+    ///   COMMAND *as* the container init, docker semantics; the unqualified verb
+    ///   follows the ecosystem convention `docker attach` / `podman attach` /
+    ///   CRI `Attach`). This boots the box but does not run the command — call
+    ///   `start()` after. That is docker's create → attach → start: attach first,
+    ///   so a command that finishes instantly cannot outrun the stream and take
+    ///   its output and exit code with it.
+    /// - `Some(id)` — reattach to a running exec session by id (docker's
+    ///   `ContainerExecAttach`), returning a fresh `Execution` on a new stream;
+    ///   the caller discards any previous handle for the same id. Used after a
+    ///   transient WebSocket drop to resume stdio without restarting the process.
+    ///   `BoxliteError::SessionReaped` if it is no longer attachable. Only the
+    ///   REST backend models these; a local box supports `None` only.
+    pub async fn attach(&self, execution_id: Option<&str>) -> BoxliteResult<Execution> {
         self.box_backend.attach(execution_id).await
     }
 
