@@ -859,7 +859,7 @@ impl RuntimeImpl {
     /// Remove a box from the runtime (internal implementation).
     ///
     /// This is the internal implementation called by both `BoxliteRuntime::remove()`
-    /// and `LiteBox::stop()` (when `auto_remove=true`).
+    /// and `LiteBox::stop()` when its removal policy is enabled.
     ///
     /// Handles both persisted boxes (in database) and in-memory-only boxes
     /// (created but not yet started).
@@ -1174,7 +1174,7 @@ impl RuntimeImpl {
         let persisted = self.box_manager.all_boxes(true)?;
 
         // Phase 1: Clean up boxes that shouldn't persist
-        // - auto_remove=true boxes: these are ephemeral and shouldn't survive restarts
+        // - remove-on-stop boxes (auto_delete): ephemeral, shouldn't survive restarts
         // - Orphaned active boxes: was Running but directory is missing (crashed mid-operation)
         //
         // Note: We don't remove Configured or Stopped boxes without directories because:
@@ -1183,10 +1183,10 @@ impl RuntimeImpl {
         // - Only Running boxes must have a directory
         let mut boxes_to_remove = Vec::new();
         for (config, state) in &persisted {
-            let should_remove = if config.options.auto_remove {
+            let should_remove = if config.options.removes_on_stop() {
                 tracing::info!(
                     box_id = %config.id,
-                    "Removing auto_remove=true box during recovery"
+                    "Removing ephemeral (remove-on-stop) box during recovery"
                 );
                 true
             } else if state.status.is_active() && !config.box_home.exists() {
@@ -1238,7 +1238,7 @@ impl RuntimeImpl {
 
         if !boxes_to_remove.is_empty() {
             tracing::info!(
-                "Cleaned up {} boxes during recovery (auto_remove or orphaned)",
+                "Cleaned up {} boxes during recovery (remove-on-stop or orphaned)",
                 boxes_to_remove.len()
             );
         }
@@ -1611,9 +1611,20 @@ impl std::fmt::Debug for RuntimeImpl {
 /// Trait methods use `&self`. This newtype holds the Arc as a field to bridge the gap.
 pub(crate) struct LocalRuntime(pub(crate) SharedRuntimeImpl);
 
+fn reject_local_lifecycle_policy(options: &BoxOptions) -> BoxliteResult<()> {
+    // Local runtimes support auto_delete as a remove-on-stop policy, but AutoPause
+    // needs a sweeper that the local runtime does not have, so it stays REST-only.
+    if options.auto_pause.is_some_and(|seconds| seconds > 0) {
+        return Err(BoxliteError::Unsupported(
+            "AutoPause is only supported by REST runtimes".into(),
+        ));
+    }
+    Ok(())
+}
 #[async_trait::async_trait]
 impl super::backend::RuntimeBackend for LocalRuntime {
     async fn create(&self, options: BoxOptions, name: Option<String>) -> BoxliteResult<LiteBox> {
+        reject_local_lifecycle_policy(&options)?;
         self.0.create(options, name).await
     }
 
@@ -1622,6 +1633,7 @@ impl super::backend::RuntimeBackend for LocalRuntime {
         options: BoxOptions,
         name: Option<String>,
     ) -> BoxliteResult<(LiteBox, bool)> {
+        reject_local_lifecycle_policy(&options)?;
         self.0.get_or_create(options, name).await
     }
 
@@ -1716,6 +1728,23 @@ mod tests {
     use crate::runtime::options::RootfsSpec;
     use tempfile::TempDir;
 
+    #[test]
+    fn local_runtime_rejects_explicit_lifecycle_policy() {
+        let mut options = BoxOptions::default();
+        assert!(reject_local_lifecycle_policy(&options).is_ok());
+
+        options.auto_pause = Some(0);
+        assert!(reject_local_lifecycle_policy(&options).is_ok());
+
+        options.auto_pause = Some(1);
+        assert!(matches!(
+            reject_local_lifecycle_policy(&options),
+            Err(BoxliteError::Unsupported(_))
+        ));
+        options.auto_pause = None;
+        options.auto_delete = Some(3600);
+        assert!(reject_local_lifecycle_policy(&options).is_ok());
+    }
     /// Create a RuntimeImpl with isolated temp directory.
     fn create_test_runtime() -> (SharedRuntimeImpl, TempDir) {
         let temp_dir = TempDir::new_in("/tmp").expect("Failed to create temp dir");
@@ -1739,7 +1768,7 @@ mod tests {
             options: BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
                 detach,
-                auto_remove: false,
+                auto_delete: Some(0),
                 ..Default::default()
             },
             engine_kind: VmmKind::Libkrun,
@@ -1793,7 +1822,7 @@ mod tests {
             options: BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
                 detach,
-                auto_remove: false,
+                auto_delete: Some(0),
                 ..Default::default()
             },
             engine_kind: VmmKind::Libkrun,

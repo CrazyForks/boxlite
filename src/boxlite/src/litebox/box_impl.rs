@@ -736,7 +736,8 @@ impl BoxImpl {
             .boxes_stopped
             .fetch_add(1, Ordering::Relaxed);
 
-        if self.config.options.auto_remove {
+        // Apply the configured remove-on-stop policy.
+        if self.config.options.removes_on_stop() {
             self.runtime.remove_box(self.id(), false)?;
         }
 
@@ -1468,7 +1469,7 @@ mod tests {
             options: BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
                 detach: false,
-                auto_remove: false,
+                auto_delete: Some(0),
                 ..Default::default()
             },
             engine_kind: VmmKind::Libkrun,
@@ -1523,7 +1524,7 @@ mod tests {
     /// child (keep it alive), the box id, and the shim pid.
     fn running_box_with_standin(
         runtime: &SharedRuntimeImpl,
-        auto_remove: bool,
+        removes_on_stop: bool,
         exit_code: i32,
     ) -> (ChildGuard, BoxID, u32) {
         let child = ChildGuard(
@@ -1546,7 +1547,7 @@ mod tests {
             options: BoxOptions {
                 rootfs: RootfsSpec::Image("alpine:latest".into()),
                 detach: false,
-                auto_remove,
+                auto_delete: Some(u32::from(removes_on_stop)),
                 ..Default::default()
             },
             engine_kind: VmmKind::Libkrun,
@@ -1642,10 +1643,10 @@ mod tests {
         drop((litebox, child));
     }
 
-    /// An `auto_remove` box is cleaned up by the watcher after its shim dies —
+    /// A remove-on-stop box is cleaned up by the watcher after its shim dies —
     /// the "other death" tail that used to depend on someone calling `stop()`.
     #[tokio::test]
-    async fn box_watcher_auto_removes_the_box_after_its_shim_dies() {
+    async fn box_watcher_removes_the_box_after_its_shim_dies() {
         let temp_dir = TempDir::new_in("/tmp").expect("create temp dir");
         let runtime = RuntimeImpl::new(BoxliteOptions {
             home_dir: temp_dir.path().to_path_buf(),
@@ -1666,7 +1667,7 @@ mod tests {
         let gone = wait_for_box(&runtime, id.as_str(), |i| i.is_none()).await;
         assert!(
             gone.is_none(),
-            "an auto_remove box must be gone after its shim dies, found {gone:?}"
+            "a remove-on-stop box must be gone after its shim dies, found {gone:?}"
         );
 
         drop((litebox, child));

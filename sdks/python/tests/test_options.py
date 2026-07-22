@@ -59,6 +59,14 @@ class TestBoxOptionsDefaults:
 class TestAutoRemoveBehavior:
     """Test auto_remove option behavior."""
 
+    def test_auto_delete_overrides_auto_remove(self, runtime):
+        box = runtime.create(
+            boxlite.BoxOptions(image="alpine:latest", auto_remove=False, auto_delete=60)
+        )
+        box_id = box.id
+        box.stop()
+        assert runtime.get_info(box_id) is None
+
     def test_auto_remove_true_removes_box_on_stop(self, runtime):
         """Test that auto_remove=True removes box when stop() is called."""
         box = runtime.create(
@@ -124,7 +132,7 @@ class TestDetachOption:
 
     def test_detach_true_creates_box(self, runtime):
         """Test that detach=True creates box successfully."""
-        # Note: detach=True requires auto_remove=False (they are incompatible)
+        # Detached boxes opt out of removal with the deprecated compatibility flag.
         box = runtime.create(
             boxlite.BoxOptions(
                 image="alpine:latest",
@@ -141,19 +149,29 @@ class TestDetachOption:
 
 
 class TestOptionCombinations:
-    """Test option combinations that were previously invalid."""
+    """Test compatibility option combinations."""
 
-    def test_auto_remove_true_detach_true_accepted(self, runtime):
-        """Test that auto_remove=True + detach=True is now accepted."""
+    def test_auto_remove_true_detach_true_rejected(self, runtime):
+        opts = boxlite.BoxOptions(
+            image="alpine:latest",
+            auto_remove=True,
+            detach=True,
+        )
+        with pytest.raises(RuntimeError, match="remove-on-stop is incompatible"):
+            runtime.create(opts)
+
+    def test_auto_delete_overrides_auto_remove_for_detach(self, runtime):
         box = runtime.create(
             boxlite.BoxOptions(
                 image="alpine:latest",
                 auto_remove=True,
+                auto_delete=0,
                 detach=True,
             )
         )
         assert box is not None
         box.stop()
+        runtime.remove(box.id)
 
 
 class TestCombinedOptions:

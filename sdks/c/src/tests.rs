@@ -376,6 +376,33 @@ fn create_box_rejects_null_callback() {
     let _ = std::fs::remove_dir_all(home_dir);
 }
 
+#[test]
+#[allow(deprecated)]
+fn auto_remove_and_auto_delete_use_last_call_wins() {
+    let image = CString::new("alpine:latest").unwrap();
+    let mut opts: *mut CBoxliteOptions = ptr::null_mut();
+    let mut error = FFIError::default();
+    assert_eq!(
+        unsafe { boxlite_options_new(image.as_ptr(), &mut opts, &mut error) },
+        BoxliteErrorCode::Ok
+    );
+    unsafe {
+        boxlite_options_set_auto_delete_interval(opts, 60);
+        boxlite_options_set_auto_remove(opts, 0);
+        assert!(!(*opts).options.auto_remove);
+        assert_eq!((*opts).options.auto_delete, None);
+
+        boxlite_options_set_auto_remove(opts, 1);
+        assert!((*opts).options.auto_remove);
+        assert_eq!((*opts).options.auto_delete, None);
+
+        boxlite_options_set_auto_delete_interval(opts, 60);
+        assert_eq!((*opts).options.auto_delete, Some(60));
+
+        boxlite_options_free(opts);
+    }
+}
+
 // Security is toggled through the advanced layer:
 // `boxlite_advanced_options_set_security_enabled` selects the enabled/disabled
 // profile on a `CAdvancedBoxOptions`, then `boxlite_options_set_advanced`

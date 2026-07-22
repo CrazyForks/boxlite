@@ -87,8 +87,19 @@ export interface JsBoxOptions {
   volumes?: JsVolumeSpec[];
   network?: JsNetworkSpec;
   ports?: JsPortSpec[];
+  /**
+   * @deprecated Use autoDelete. Preserved for embedded remove-on-stop
+   * compatibility; an explicit autoDelete value takes precedence. Remote
+   * runtimes preserve server lifecycle defaults when autoDelete is omitted.
+   */
   autoRemove?: boolean;
   detach?: boolean;
+  /** Idle time in seconds before AutoPause; 0 disables AutoPause. */
+  autoPause?: number;
+  /** Time in seconds after stop before AutoDelete; 0 disables AutoDelete. */
+  autoDelete?: number;
+  /** Whether access automatically resumes an auto-paused box. */
+  autoResume?: boolean;
   entrypoint?: string[];
   cmd?: string[];
   user?: string;
@@ -170,6 +181,9 @@ export interface JsBoxInfo {
   image: string;
   cpus: number;
   memoryMib: number;
+  autoPause: number;
+  autoDelete: number;
+  autoResume: boolean;
   healthStatus: JsHealthStatus;
 }
 

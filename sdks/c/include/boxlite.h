@@ -253,6 +253,9 @@ typedef struct CBoxInfo {
   int pid;
   int cpus;
   int memory_mib;
+  uint32_t auto_pause;
+  uint32_t auto_delete;
+  int auto_resume;
   int64_t created_at;
 } CBoxInfo;
 
@@ -577,7 +580,14 @@ void boxlite_options_add_secret(CBoxliteOptions *opts,
                                 const char *const *hosts,
                                 int hosts_count);
 
+// Deprecated: use boxlite_options_set_auto_delete_interval.
 void boxlite_options_set_auto_remove(CBoxliteOptions *opts, int val);
+
+void boxlite_options_set_auto_pause_interval(CBoxliteOptions *opts, uint32_t seconds);
+
+void boxlite_options_set_auto_delete_interval(CBoxliteOptions *opts, uint32_t seconds);
+
+void boxlite_options_set_auto_resume_enabled(CBoxliteOptions *opts, int val);
 
 void boxlite_options_set_detach(CBoxliteOptions *opts, int val);
 
