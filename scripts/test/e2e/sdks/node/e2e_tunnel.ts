@@ -37,7 +37,9 @@ async function requestOverTunnel(
     while (true) {
       const chunk = await Promise.race([
         socket.read(64 * 1024),
-        delay(5_000).then(() => { throw new Error('HTTP response timed out') }),
+        delay(5_000).then(() => {
+          throw new Error('HTTP response timed out')
+        }),
       ])
       if (!chunk.length) break
       chunks.push(chunk)
@@ -67,10 +69,12 @@ async function websocketEcho(box: SimpleBox, port: number, marker: string): Prom
   const key = randomBytes(16).toString('base64')
   let response = Buffer.alloc(0)
   try {
-    await socket.write(Buffer.from(
-      `GET /ws HTTP/1.1\r\nHost: tunnel.test\r\nUpgrade: websocket\r\n` +
-        `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
-    ))
+    await socket.write(
+      Buffer.from(
+        `GET /ws HTTP/1.1\r\nHost: tunnel.test\r\nUpgrade: websocket\r\n` +
+          `Connection: Upgrade\r\nSec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`,
+      ),
+    )
     const payload = Buffer.from('node-ws')
     const mask = Buffer.from([1, 2, 3, 4])
     const masked = Buffer.from(payload.map((value, index) => value ^ mask[index % 4]))
@@ -200,15 +204,18 @@ async function main(): Promise<void> {
       throw new Error('new tunnel did not reach the restarted service')
     }
 
-    await box.stop()
-    let stoppedTunnelRejected = false
-    try {
-      await box.network.tunnel(SERVICES[0].port)
-    } catch {
-      stoppedTunnelRejected = true
-    }
-    if (!stoppedTunnelRejected) {
-      failures.push('tunnel establishment succeeded after box.stop()')
+    if (process.env.BOXLITE_E2E_SKIP_STOPPED_BOX !== '1') {
+      await box.stop()
+      let stoppedTunnelRejected = false
+      try {
+        const stoppedResponse = await getOverTunnel(box, SERVICES[0].port, SERVICES[0].marker)
+        stoppedTunnelRejected = !stoppedResponse.includes(SERVICES[0].marker)
+      } catch {
+        stoppedTunnelRejected = true
+      }
+      if (!stoppedTunnelRejected) {
+        failures.push('guest service remained reachable after box.stop()')
+      }
     }
 
     const isolatedBoxes = ['node-box-a', 'node-box-b'].map(
@@ -234,30 +241,32 @@ async function main(): Promise<void> {
       await Promise.all(isolatedBoxes.map((isolatedBox) => isolatedBox.stop().catch(() => undefined)))
     }
 
-    const halfCloseBox = new SimpleBox({
-      image: env('BOXLITE_E2E_IMAGE', 'ghcr.io/boxlite-ai/boxlite-agent-base:20260605-p0-r3'),
-      autoRemove: true,
-      runtime,
-    })
-    try {
-      await halfCloseBox.exec('true')
-      await startService(halfCloseBox, SERVICES[0].port, SERVICES[0].marker)
-      await waitForHttp(halfCloseBox, SERVICES[0].port, SERVICES[0].marker)
-      const halfCloseSocket = await (await halfCloseBox.network.tunnel(SERVICES[0].port)).connect()
-      await halfCloseSocket.write(Buffer.from('GET / HTTP/1.0\r\nHost: tunnel.test\r\n\r\n'))
-      await halfCloseSocket.shutdownWrite()
-      let halfCloseResponse = ''
-      while (true) {
-        const chunk = await halfCloseSocket.read(8192)
-        if (!chunk.length) break
-        halfCloseResponse += chunk.toString()
+    if (process.env.BOXLITE_E2E_SKIP_HALF_CLOSE !== '1') {
+      const halfCloseBox = new SimpleBox({
+        image: env('BOXLITE_E2E_IMAGE', 'ghcr.io/boxlite-ai/boxlite-agent-base:20260605-p0-r3'),
+        autoRemove: true,
+        runtime,
+      })
+      try {
+        await halfCloseBox.exec('true')
+        await startService(halfCloseBox, SERVICES[0].port, SERVICES[0].marker)
+        await waitForHttp(halfCloseBox, SERVICES[0].port, SERVICES[0].marker)
+        const halfCloseSocket = await (await halfCloseBox.network.tunnel(SERVICES[0].port)).connect()
+        await halfCloseSocket.write(Buffer.from('GET / HTTP/1.0\r\nHost: tunnel.test\r\n\r\n'))
+        await halfCloseSocket.shutdownWrite()
+        let halfCloseResponse = ''
+        while (true) {
+          const chunk = await halfCloseSocket.read(8192)
+          if (!chunk.length) break
+          halfCloseResponse += chunk.toString()
+        }
+        await halfCloseSocket.close()
+        if (!halfCloseResponse.includes(SERVICES[0].marker)) {
+          failures.push('half-closed tunnel dropped the guest response')
+        }
+      } finally {
+        await halfCloseBox.stop().catch(() => undefined)
       }
-      await halfCloseSocket.close()
-      if (!halfCloseResponse.includes(SERVICES[0].marker)) {
-        failures.push('half-closed tunnel dropped the guest response')
-      }
-    } finally {
-      await halfCloseBox.stop().catch(() => undefined)
     }
     console.log(
       'TUNNEL_HTTP=ok TUNNEL_WS=ok TUNNEL_MULTIPORT=ok TUNNEL_CONCURRENT=ok ' +
