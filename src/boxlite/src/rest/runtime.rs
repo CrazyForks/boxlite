@@ -97,6 +97,13 @@ impl RuntimeBackend for RestRuntime {
             auto_resume: options.auto_resume.unwrap_or(true),
         }
         .validate()?;
+
+        // A server that does not advertise the capability policy would accept
+        // the request and drop the field, silently granting default privileges.
+        if !options.advanced.capabilities.is_empty() {
+            self.client.require_linux_capabilities_enabled().await?;
+        }
+
         let req = CreateBoxRequest::from_options(&options, name);
         let resp: BoxResponse = self.client.post("/boxes", &req).await?;
         let info = resp.to_box_info()?;
@@ -121,7 +128,7 @@ impl RuntimeBackend for RestRuntime {
     }
 
     async fn get(&self, id_or_name: &str) -> BoxliteResult<Option<LiteBox>> {
-        let path = format!("/boxes/{}", id_or_name);
+        let path = format!("/boxes/{id_or_name}");
         match self.client.get::<BoxResponse>(&path).await {
             Ok(resp) => {
                 let info = resp.to_box_info()?;
@@ -134,7 +141,7 @@ impl RuntimeBackend for RestRuntime {
     }
 
     async fn get_info(&self, id_or_name: &str) -> BoxliteResult<Option<BoxInfo>> {
-        let path = format!("/boxes/{}", id_or_name);
+        let path = format!("/boxes/{id_or_name}");
         match self.client.get::<BoxResponse>(&path).await {
             Ok(resp) => Ok(Some(resp.to_box_info()?)),
             Err(BoxliteError::NotFound(_)) => Ok(None),
@@ -144,7 +151,7 @@ impl RuntimeBackend for RestRuntime {
 
     async fn list_info(&self) -> BoxliteResult<Vec<BoxInfo>> {
         let resp: ListBoxesResponse = self.client.get("/boxes").await?;
-        resp.boxes.iter().map(|b| b.to_box_info()).collect()
+        resp.boxes.iter().map(BoxResponse::to_box_info).collect()
     }
 
     async fn exists(&self, id_or_name: &str) -> BoxliteResult<bool> {
@@ -233,6 +240,53 @@ fn runtime_metrics_from_response(resp: &RuntimeMetricsResponse) -> RuntimeMetric
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const BOX_RESPONSE: &str = r#"{"box_id":"01HJK4TNRPQSXYZ8WM6NCVT9R5","name":"named","status":"configured","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","pid":null,"image":"alpine:latest","cpus":2,"memory_mib":512,"labels":{}}"#;
+
+    fn capability_options() -> BoxOptions {
+        BoxOptions {
+            advanced: crate::AdvancedBoxOptions {
+                capabilities: crate::ContainerCapabilities {
+                    drop: vec!["NET_RAW".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    async fn json_server(bodies: Vec<&'static str>) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for body in bodies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                let request = String::from_utf8(headers).unwrap();
+                requests.push(request.lines().next().unwrap().to_string());
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        (port, server)
+    }
 
     #[tokio::test]
     async fn test_import_box_requires_capability() {
@@ -275,6 +329,81 @@ mod tests {
             !err.to_string()
                 .contains("auto_delete must be greater than auto_pause"),
             "remove-on-stop without auto_pause must pass client validation; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_capabilities_require_server_advertisement_before_create() {
+        // A server that does not advertise the feature would accept the create
+        // request and drop `advanced`, silently granting default privileges.
+        let (port, server) = json_server(vec![r#"{"capabilities":{}}"#]).await;
+        let runtime =
+            RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        let error = match RuntimeBackend::create(&runtime, capability_options(), None).await {
+            Err(error) => error,
+            Ok(_) => panic!("an old server must not silently ignore a capability policy"),
+        };
+
+        assert!(matches!(error, BoxliteError::Unsupported(_)));
+        assert_eq!(server.await.unwrap(), ["GET /v1/config HTTP/1.1"]);
+    }
+
+    #[tokio::test]
+    async fn advertised_capability_support_creates_on_the_shared_route() {
+        let (port, server) = json_server(vec![
+            r#"{"capabilities":{"linux_capabilities_enabled":true}}"#,
+            BOX_RESPONSE,
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        RuntimeBackend::create(&runtime, capability_options(), None)
+            .await
+            .expect("create with a capability policy");
+
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/config HTTP/1.1", "POST /v1/boxes HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_create_does_not_probe_server_capabilities() {
+        let (port, server) = json_server(vec![BOX_RESPONSE]).await;
+        let runtime =
+            RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        RuntimeBackend::create(&runtime, BoxOptions::default(), None)
+            .await
+            .expect("create without a capability policy");
+
+        assert_eq!(server.await.unwrap(), ["POST /v1/boxes HTTP/1.1"]);
+    }
+
+    /// Inspection reads the shared routes. Addressing a versioned variant here
+    /// would 404, and `get` maps NotFound to `Ok(None)` — so an existing box
+    /// would silently report as missing rather than failing loudly.
+    #[tokio::test]
+    async fn inspection_uses_the_shared_box_routes() {
+        let (port, server) = json_server(vec![BOX_RESPONSE, BOX_RESPONSE]).await;
+        let runtime =
+            RestRuntime::new(&BoxliteRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        let found = RuntimeBackend::get(&runtime, "named").await.expect("get");
+        let info = RuntimeBackend::get_info(&runtime, "named")
+            .await
+            .expect("get_info");
+
+        assert!(found.is_some(), "an existing box must not read as missing");
+        assert!(info.is_some(), "an existing box must expose its info");
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "GET /v1/boxes/named HTTP/1.1",
+                "GET /v1/boxes/named HTTP/1.1"
+            ]
         );
     }
 

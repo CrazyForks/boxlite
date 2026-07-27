@@ -15,20 +15,37 @@ use crate::disk::constants::filenames as disk_filenames;
 /// Manifest filename inside the archive.
 pub(crate) const MANIFEST_FILENAME: &str = "manifest.json";
 
-/// Current archive format version.
+/// Archive format version for configurations a v3 importer reads correctly.
 pub(crate) const ARCHIVE_VERSION: u32 = 3;
 
+/// First archive version that carries a custom Linux capability policy.
+///
+/// A pre-capability importer accepts up to v3 and would silently drop
+/// `advanced.capabilities`, starting the box with wider privileges than the
+/// archive asked for. Stamping v4 makes that importer refuse the archive.
+pub(crate) const CAPABILITY_POLICY_ARCHIVE_VERSION: u32 = 4;
+
 /// Maximum archive version this build can import.
-pub(crate) const MAX_SUPPORTED_VERSION: u32 = 3;
+pub(crate) const MAX_SUPPORTED_VERSION: u32 = CAPABILITY_POLICY_ARCHIVE_VERSION;
+
+/// Pick the archive format an exported box needs.
+pub(crate) fn archive_version_for_options(options: &crate::runtime::options::BoxOptions) -> u32 {
+    if options.advanced.capabilities.is_empty() {
+        ARCHIVE_VERSION
+    } else {
+        CAPABILITY_POLICY_ARCHIVE_VERSION
+    }
+}
 
 /// Archive manifest stored as `manifest.json` inside exported archives.
 ///
 /// v1: plain tar, no checksums
 /// v2: tar.zst with checksums
 /// v3: adds `box_options` for full configuration preservation
+/// v4: `box_options.advanced` carries a custom capability policy
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArchiveManifest {
-    /// Archive format version (1, 2, or 3).
+    /// Archive format version (1 through 4).
     pub version: u32,
     /// Original box name (optional, may be renamed on import).
     pub box_name: Option<String>,
@@ -238,6 +255,35 @@ pub(crate) fn sha256_file(path: &Path) -> BoxliteResult<String> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// A capability-bearing export must not be readable by an importer that
+    /// would drop the policy: those archives are stamped v4, ordinary ones v3.
+    ///
+    /// The literals are the compatibility boundary itself — a pre-capability
+    /// importer accepts up to 3 — so pin them, not just the branch.
+    #[test]
+    fn only_a_capability_policy_raises_the_archive_version() {
+        assert_eq!(ARCHIVE_VERSION, 3);
+        assert_eq!(CAPABILITY_POLICY_ARCHIVE_VERSION, 4);
+
+        let ordinary = crate::runtime::options::BoxOptions::default();
+        assert_eq!(archive_version_for_options(&ordinary), ARCHIVE_VERSION);
+
+        let custom = crate::runtime::options::BoxOptions {
+            advanced: crate::runtime::advanced_options::AdvancedBoxOptions {
+                capabilities: crate::runtime::advanced_options::ContainerCapabilities {
+                    drop: vec!["NET_RAW".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            archive_version_for_options(&custom),
+            CAPABILITY_POLICY_ARCHIVE_VERSION
+        );
+    }
 
     #[test]
     fn test_extract_zstd_archive_via_magic_bytes() {

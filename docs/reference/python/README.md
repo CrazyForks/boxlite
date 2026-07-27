@@ -132,8 +132,25 @@ Configuration options for creating a box.
 | `network` | `NetworkSpec \| None` | `None` | Structured network configuration. Omit for default enabled networking. |
 | `ports` | `List[Tuple[int, int, str]]` | `[]` | Port forwarding as (host_port, guest_port, protocol) |
 | `secrets` | `List[Secret]` | `[]` | Outbound HTTP(S) secret substitution rules |
+| `advanced` | `AdvancedBoxOptions \| None` | `None` | Expert-only options, including `capabilities.add` and `capabilities.drop` |
 | `auto_remove` | `bool` | `True` | Auto cleanup when stopped |
 | `detach` | `bool` | `False` | Survive parent process exit |
+
+Capability policy is intentionally nested with the other expert-only options:
+
+```python
+from boxlite import AdvancedBoxOptions, BoxOptions, ContainerCapabilities
+
+options = BoxOptions(
+    image="alpine:latest",
+    advanced=AdvancedBoxOptions(
+        capabilities=ContainerCapabilities(
+            add=["NET_BIND_SERVICE"],
+            drop=["NET_RAW"],
+        )
+    ),
+)
+```
 
 #### `NetworkSpec`
 
@@ -227,7 +244,6 @@ Metadata about a box.
 | `image` | `str` | OCI image used |
 | `cpus` | `int` | Allocated CPU cores |
 | `memory_mib` | `int` | Allocated memory in MiB |
-
 ---
 
 ### `boxlite.BoxStateInfo`

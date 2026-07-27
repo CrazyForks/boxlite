@@ -148,7 +148,6 @@ impl From<BoxInfo> for JsBoxInfo {
             failures: info.health_status.failures,
             last_check: info.health_status.last_check.map(|dt| dt.to_rfc3339()),
         };
-
         Self {
             id: info.id.to_string(),
             name: info.name,

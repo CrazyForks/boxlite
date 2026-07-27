@@ -176,7 +176,6 @@ pub(crate) struct PyBoxInfo {
     pub(crate) cpus: u8,
     #[pyo3(get)]
     pub(crate) memory_mib: u32,
-    #[pyo3(get)]
     pub(crate) auto_pause: u32,
     #[pyo3(get)]
     pub(crate) auto_delete: u32,
@@ -223,7 +222,6 @@ impl From<BoxInfo> for PyBoxInfo {
             failures: info.health_status.failures,
             last_check: info.health_status.last_check.map(|dt| dt.to_rfc3339()),
         };
-
         PyBoxInfo {
             id: info.id.to_string(),
             name: info.name,

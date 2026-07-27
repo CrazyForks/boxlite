@@ -242,6 +242,9 @@ Configuration options for creating a box.
 - `ports: List[Tuple[int, int, str]]` - Port forwarding as (host_port, guest_port, protocol)
   - Protocol: `"tcp"` or `"udp"`
 - `secrets: List[Secret]` - Host-side HTTP(S) secret substitution rules
+- `advanced: AdvancedBoxOptions | None` - Expert-only container options
+  - `capabilities.add: List[str]` - Capabilities added to BoxLite's baseline
+  - `capabilities.drop: List[str]` - Capabilities removed from the resulting set
 - `auto_remove: bool` - Auto cleanup after stop (default: True)
 
 `NetworkSpec` uses:
@@ -272,6 +275,12 @@ options = boxlite.BoxOptions(
     network=boxlite.NetworkSpec(
         mode="enabled",
         allow_net=["api.openai.com"],
+    ),
+    advanced=boxlite.AdvancedBoxOptions(
+        capabilities=boxlite.ContainerCapabilities(
+            add=["NET_ADMIN"],
+            drop=["NET_RAW"],
+        ),
     ),
     secrets=[
         boxlite.Secret(

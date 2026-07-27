@@ -766,6 +766,13 @@ fn build_box_options(req: &CreateBoxRequest) -> Result<BoxOptions, boxlite::Boxl
         cmd: req.cmd.clone(),
         user: req.user.clone(),
         tty: req.tty.unwrap_or(false),
+        advanced: boxlite::AdvancedBoxOptions {
+            capabilities: boxlite::ContainerCapabilities {
+                add: req.advanced.capabilities.add.clone(),
+                drop: req.advanced.capabilities.drop.clone(),
+            },
+            ..Default::default()
+        },
         auto_pause: req.auto_pause,
         auto_delete: Some(auto_delete),
         auto_resume: req.auto_resume,
@@ -1311,6 +1318,18 @@ mod tests {
             !build_box_options(&without).expect("build").tty,
             "no tty asked for, none granted"
         );
+    }
+
+    #[test]
+    fn build_box_options_carries_container_capabilities_from_the_wire() {
+        let req: super::types::CreateBoxRequest = serde_json::from_str(
+            r#"{"image":"alpine:latest","advanced":{"capabilities":{"add":["SYS_ADMIN"],"drop":["CAP_NET_RAW"]}}}"#,
+        )
+        .expect("capability request must deserialize");
+
+        let opts = build_box_options(&req).expect("build capability options");
+        assert_eq!(opts.advanced.capabilities.add, vec!["SYS_ADMIN"]);
+        assert_eq!(opts.advanced.capabilities.drop, vec!["CAP_NET_RAW"]);
     }
 
     #[test]

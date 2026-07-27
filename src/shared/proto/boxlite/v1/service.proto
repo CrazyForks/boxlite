@@ -307,6 +307,21 @@ message ContainerConfig {
   // guest opens the PTY at a default size and the attaching client's
   // ResizeTty sets the real one.
   bool tty = 5;
+
+  // Expert-only container process options.
+  ContainerAdvancedOptions advanced = 6;
+}
+
+message ContainerAdvancedOptions {
+  ContainerCapabilities capabilities = 1;
+}
+
+message ContainerCapabilities {
+  // Capabilities to add to the default capability set.
+  repeated string add = 1;
+
+  // Capabilities to remove from the resulting capability set.
+  repeated string drop = 2;
 }
 
 // ============================================================================
