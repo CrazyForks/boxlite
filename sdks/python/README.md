@@ -107,16 +107,19 @@ The main runtime for creating and managing boxes.
 - `Boxlite(options: Options) -> Boxlite`
   Create runtime with custom options
 
-- `create(box_options: BoxOptions) -> Box`
+- `async create(box_options: BoxOptions) -> Box`
   Create a new box with specified configuration
 
-- `get(box_id: str) -> Box`
+- `async get(box_id: str) -> Optional[Box]`
   Reattach to an existing box by ID
 
-- `list() -> List[BoxInfo]`
+- `async get_info(box_id: str) -> Optional[BoxInfo]`
+  Get current metadata for a box by ID or name
+
+- `async list_info() -> List[BoxInfo]`
   List all boxes (running and stopped)
 
-- `metrics() -> RuntimeMetrics`
+- `async metrics() -> RuntimeMetrics`
   Get runtime-wide metrics
 
 **Example:**
@@ -142,15 +145,15 @@ runtime = boxlite.Boxlite(
 )
 
 # Create a box
-box = runtime.create(boxlite.BoxOptions(image="alpine:latest"))
+box = await runtime.create(boxlite.BoxOptions(image="alpine:latest"))
 
 # Reattach to existing box
-box = runtime.get("01JJNH8...")
+box = await runtime.get("01JJNH8...")
 
 # List all boxes
-boxes = runtime.list()
+boxes = await runtime.list_info()
 for info in boxes:
-    print(f"{info.id}: {info.status}")
+    print(f"{info.id}: {info.state.status}")
 ```
 
 #### Runtime Image Management
@@ -239,8 +242,10 @@ Configuration options for creating a box.
 - `volumes: List[Tuple[str, str, str]]` - Volume mounts as (host_path, guest_path, mode)
   - Mode: `"ro"` (read-only) or `"rw"` (read-write)
 - `network: NetworkSpec | None` - Structured network configuration
-- `ports: List[Tuple[int, int, str]]` - Port forwarding as (host_port, guest_port, protocol)
-  - Protocol: `"tcp"` or `"udp"`
+- `ports: List[Tuple | Dict]` - Local TCP forwarding; omit `host_port` in a dict for automatic allocation
+  - Protocol: `"tcp"`; UDP is rejected
+  - Portable local/remote code uses `box.network.tunnel(port)`; each tunnel
+    handle represents one connection
 - `secrets: List[Secret]` - Host-side HTTP(S) secret substitution rules
 - `advanced: AdvancedBoxOptions | None` - Expert-only container options
   - `capabilities.add: List[str]` - Capabilities added to BoxLite's baseline
@@ -290,7 +295,7 @@ options = boxlite.BoxOptions(
         ),
     ],
 )
-box = runtime.create(options)
+box = await runtime.create(options)
 ```
 
 ### Box Handle
@@ -314,8 +319,13 @@ Handle to a running or stopped box.
 - `remove() -> None`
   Delete the box and its data (async)
 
-- `info() -> BoxInfo`
+- `info() -> Awaitable[BoxInfo]`
   Get box metadata (async)
+  - `info.network` contains `NetworkInfo` when network metadata is available
+  - When `info.network` is not `None`, `published_ports` is `None` when
+    this handle does not know the bindings, `[]` when there are no active
+    publications, or a list of named `PublishedPort` objects
+  - bindings become available after this handle starts or reattaches the box
 
 - `metrics() -> BoxMetrics`
   Get box resource usage metrics (async)
@@ -323,7 +333,7 @@ Handle to a running or stopped box.
 **Example:**
 
 ```python
-box = runtime.create(boxlite.BoxOptions(image="alpine:latest"))
+box = await runtime.create(boxlite.BoxOptions(image="alpine:latest"))
 
 # Execute commands
 execution = await box.exec("echo", "Hello")
@@ -331,7 +341,7 @@ result = await execution.wait()
 
 # Get box info
 info = await box.info()
-print(f"Box {info.id}: {info.status}")
+print(f"Box {info.id}: {info.state.status}")
 
 # Stop and remove
 await box.stop()
@@ -539,7 +549,7 @@ async with boxlite.SimpleBox() as box:
 # Box automatically stopped and removed
 
 # Manual cleanup (if not using context manager)
-box = runtime.create(boxlite.BoxOptions(image="alpine"))
+box = await runtime.create(boxlite.BoxOptions(image="alpine"))
 try:
     await box.exec("command")
 finally:
@@ -636,10 +646,8 @@ boxlite.BoxOptions(
 ```python
 boxlite.BoxOptions(
     ports=[
-        (8080, 80, "tcp"),  # HTTP
-        (8443, 443, "tcp"),  # HTTPS
-        (5432, 5432, "tcp"),  # PostgreSQL
-        (53, 53, "udp"),  # DNS
+        (8080, 80, "tcp"),  # Fixed host port
+        {"guest_port": 3000},  # OS-selected host port
     ]
 )
 ```
@@ -749,7 +757,7 @@ Get aggregate metrics across all boxes:
 
 ```python
 runtime = boxlite.Boxlite.default()
-metrics = runtime.metrics()
+metrics = await runtime.metrics()
 
 print(f"Boxes created: {metrics.boxes_created}")
 print(f"Boxes destroyed: {metrics.boxes_destroyed}")
@@ -767,7 +775,7 @@ print(f"Total exec calls: {metrics.total_exec_calls}")
 Get per-box resource usage:
 
 ```python
-box = runtime.create(boxlite.BoxOptions(image="alpine"))
+box = await runtime.create(boxlite.BoxOptions(image="alpine"))
 metrics = await box.metrics()
 
 print(f"CPU time: {metrics.cpu_time_ms}ms")

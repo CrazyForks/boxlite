@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
 
+from pydantic import ValidationError
+
 
 SERVER_PATH = Path(__file__).resolve().parents[1] / "server.py"
 SERVER_DIR = SERVER_PATH.parent
@@ -77,7 +79,7 @@ def _make_box_info(box_id: str, *, name: str = "test-box", status: str = "create
 
 def _make_box_handle(box_id: str, *, name: str = "test-box"):
     info = _make_box_info(box_id, name=name)
-    handle = SimpleNamespace(info=lambda: info)
+    handle = SimpleNamespace(info=AsyncMock(return_value=info))
     handle.start = AsyncMock()
     handle.stop = AsyncMock()
     handle.clone = AsyncMock()
@@ -156,6 +158,16 @@ class HandleCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(payload["box_id"], "box-create")
         self.assertIn("box-create", SERVER.state.active_boxes_by_id)
+
+    def test_create_request_rejects_remote_port_publication(self) -> None:
+        with self.assertRaises(ValidationError):
+            SERVER.CreateBoxRequest.model_validate(
+                {"ports": [{"guest_port": 3000}]}
+            )
+
+    def test_dedicated_ports_route_is_removed(self) -> None:
+        paths = {route.path for route in SERVER.app.routes}
+        self.assertNotIn("/v1/{prefix}/boxes/{box_id}/ports", paths)
 
     def test_build_box_options_forwards_capability_policy(self) -> None:
         request = SERVER.CreateBoxRequest(
@@ -253,10 +265,10 @@ class HandleCacheTests(unittest.IsolatedAsyncioTestCase):
         runtime.get.assert_not_called()
 
     async def test_remove_box_evicts_cached_handle_using_canonical_id(self) -> None:
-        cached = _make_box_handle("box-canonical")
+        cached = _make_box_handle("box-canonical", name="friendly-name")
         SERVER.state.active_boxes_by_id["box-canonical"] = cached
         runtime = SimpleNamespace(
-            get_info=AsyncMock(return_value=_make_box_info("box-canonical")),
+            list_info=AsyncMock(return_value=[await cached.info()]),
             remove=AsyncMock(return_value=None),
         )
         SERVER.state.runtime = runtime
@@ -266,9 +278,19 @@ class HandleCacheTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.status_code, 204)
-        runtime.get_info.assert_awaited_once_with("friendly-name")
+        runtime.list_info.assert_awaited_once_with()
         runtime.remove.assert_awaited_once_with("friendly-name", force=False)
         self.assertNotIn("box-canonical", SERVER.state.active_boxes_by_id)
+
+    async def test_head_uses_snapshot_lookup_without_attaching_handle(self) -> None:
+        info = _make_box_info("box-head")
+        runtime = SimpleNamespace(list_info=AsyncMock(return_value=[info]))
+        SERVER.state.runtime = runtime
+
+        response = await SERVER.box_exists("demo", "box-head", _auth={})
+
+        self.assertEqual(response.status_code, 204)
+        runtime.list_info.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

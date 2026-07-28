@@ -359,13 +359,27 @@ func TestWithPortExplicitSpec(t *testing.T) {
 	}
 }
 
+func TestPortSpecAcceptsHostIPAndAutomaticHostPort(t *testing.T) {
+	cPort, err := (PortSpec{
+		Host:     0,
+		Guest:    3000,
+		Protocol: PortProtocolTcp,
+		HostIP:   "127.0.0.1",
+	}).toCSpec()
+	if err != nil {
+		t.Fatalf("toCSpec: %v", err)
+	}
+	if cPort.host_port != 0 || cPort.host_ip != "127.0.0.1" {
+		t.Fatalf("c port: got host_port=%d host_ip=%q", cPort.host_port, cPort.host_ip)
+	}
+}
+
 func TestPortSpecRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		name string
 		port PortSpec
 	}{
 		{"udp unsupported", PortSpec{Host: 5353, Guest: 53, Protocol: PortProtocolUdp}},
-		{"host ip unsupported", PortSpec{Host: 8080, Guest: 80, Protocol: PortProtocolTcp, HostIP: "127.0.0.1"}},
 		{"guest zero", PortSpec{Host: 8080, Guest: 0, Protocol: PortProtocolTcp}},
 		{"guest too high", PortSpec{Host: 8080, Guest: 65536, Protocol: PortProtocolTcp}},
 		{"host negative", PortSpec{Host: -1, Guest: 80, Protocol: PortProtocolTcp}},

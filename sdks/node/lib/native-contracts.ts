@@ -228,6 +228,20 @@ export interface JsBoxStateInfo {
   pid?: number;
 }
 
+export interface JsPublishedPort {
+  guestPort: number;
+  hostIp: string;
+  hostPort: number;
+  protocol: "tcp" | "udp";
+}
+
+export interface JsNetworkInfo {
+  mode: "enabled" | "disabled";
+  allowNet: string[];
+  /** `null` means unknown to this handle; `[]` means no active publications. */
+  publishedPorts: JsPublishedPort[] | null;
+}
+
 export interface JsBoxInfo {
   id: string;
   name?: string;
@@ -236,6 +250,7 @@ export interface JsBoxInfo {
   image: string;
   cpus: number;
   memoryMib: number;
+  network: JsNetworkInfo | null;
   autoPause: number;
   autoDelete: number;
   autoResume: boolean;
@@ -350,7 +365,7 @@ export type JsExportOptions = Record<string, never>;
 export interface JsBox {
   readonly id: string;
   readonly name: string | null;
-  info(): JsBoxInfo;
+  info(): Promise<JsBoxInfo>;
   exec(
     command: string,
     args?: string[] | null,

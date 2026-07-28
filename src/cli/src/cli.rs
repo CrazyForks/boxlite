@@ -660,7 +660,7 @@ impl NetworkFlags {
 
 #[derive(Args, Debug, Clone)]
 pub struct PublishFlags {
-    /// Publish a box port to the host (format: [hostPort:]boxPort[/tcp|udp], e.g. 18789:18789)
+    /// Publish a TCP box port locally (boxPort uses an automatic host port)
     #[arg(short = 'p', long = "publish", value_name = "PORT")]
     pub publish: Vec<String>,
 }
@@ -669,23 +669,15 @@ impl PublishFlags {
     pub fn apply_to(&self, opts: &mut BoxOptions) -> anyhow::Result<()> {
         for s in &self.publish {
             let spec = parse_publish_spec(s)?;
-            if matches!(spec.protocol, PortProtocol::Udp) {
-                eprintln!(
-                    "Warning: UDP port forwarding is not yet implemented; {} will be forwarded as TCP",
-                    s
-                );
-            }
             opts.ports.push(spec);
         }
         Ok(())
     }
 }
 
-/// Parse a single publish spec: `[hostPort:]boxPort[/tcp|udp]`.
+/// Parse a single publish spec: `[hostPort:]boxPort[/tcp]`.
 /// - `boxPort` → host_port=None, guest_port=boxPort
 /// - `hostPort:boxPort` → host_port=Some(hostPort), guest_port=boxPort
-///
-/// Only TCP is forwarded by the runtime today; UDP is accepted but not yet implemented.
 fn parse_publish_spec(s: &str) -> anyhow::Result<PortSpec> {
     let s = s.trim();
     if s.is_empty() {
@@ -696,9 +688,9 @@ fn parse_publish_spec(s: &str) -> anyhow::Result<PortSpec> {
             let p = if proto.eq_ignore_ascii_case("tcp") {
                 PortProtocol::Tcp
             } else if proto.eq_ignore_ascii_case("udp") {
-                PortProtocol::Udp
+                anyhow::bail!("UDP port forwarding is not implemented; use TCP")
             } else {
-                anyhow::bail!("invalid protocol {:?}; use tcp or udp", proto)
+                anyhow::bail!("invalid protocol {:?}; use tcp", proto)
             };
             (r.trim(), p)
         }
@@ -1495,11 +1487,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_publish_spec_udp() {
-        let spec = super::parse_publish_spec("53:53/udp").unwrap();
-        assert_eq!(spec.host_port, Some(53));
-        assert_eq!(spec.guest_port, 53);
-        assert!(matches!(spec.protocol, PortProtocol::Udp));
+    fn test_parse_publish_spec_udp_is_rejected() {
+        let err = super::parse_publish_spec("53:53/udp").unwrap_err();
+        assert!(err.to_string().contains("UDP port forwarding"));
     }
 
     #[test]
@@ -1725,6 +1715,18 @@ mod tests {
     fn network_tunnel_rejects_port_zero_at_parse() {
         let result = Cli::try_parse_from(["boxlite", "network", "tunnel", "mybox", "0"]);
         assert!(result.is_err(), "port 0 must be rejected by the parser");
+    }
+
+    /// `boxlite port BOX` existed earlier on this branch and was withdrawn:
+    /// resolved bindings are reported through `boxlite inspect`, and remote
+    /// access goes through `boxlite network tunnel`.
+    #[test]
+    fn withdrawn_port_subcommand_is_rejected() {
+        let result = Cli::try_parse_from(["boxlite", "port", "mybox"]);
+        assert!(
+            result.is_err(),
+            "the withdrawn port command must not come back"
+        );
     }
 
     #[test]

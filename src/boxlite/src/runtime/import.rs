@@ -8,11 +8,13 @@ use boxlite_shared::errors::{BoxliteError, BoxliteResult};
 use crate::disk::constants::filenames as disk_filenames;
 use crate::litebox::LiteBox;
 use crate::litebox::archive::{
-    ArchiveManifest, MANIFEST_FILENAME, MAX_SUPPORTED_VERSION, extract_archive, move_file,
-    sha256_file,
+    ArchiveManifest, MANIFEST_FILENAME, MAX_SUPPORTED_VERSION, PUBLISHED_PORTS_ARCHIVE_VERSION,
+    extract_archive, move_file, sha256_file,
 };
 use crate::runtime::advanced_options::SecurityOptions;
-use crate::runtime::options::{ArchiveImportPolicy, BoxArchive, BoxOptions, RootfsSpec};
+use crate::runtime::options::{
+    ArchiveImportPolicy, BoxArchive, BoxOptions, RootfsSpec, normalize_legacy_ports,
+};
 use crate::runtime::rt_impl::RuntimeImpl;
 use crate::runtime::types::BoxStatus;
 
@@ -79,6 +81,19 @@ fn options_from_manifest(
         rootfs: RootfsSpec::Image(manifest.image.clone()),
         ..Default::default()
     });
+    // Up to v4 an archive's ports carried no publication semantics: a null
+    // host port meant the guest port, and host_ip and protocol were ignored.
+    // Canonicalize before sanitize, so the rewritten mappings are validated.
+    if manifest.version < PUBLISHED_PORTS_ARCHIVE_VERSION {
+        let changed_mappings = normalize_legacy_ports(&mut options.ports);
+        if changed_mappings > 0 {
+            tracing::warn!(
+                archive_version = manifest.version,
+                changed_mappings,
+                "Canonicalized legacy archive port mappings"
+            );
+        }
+    }
     options.sanitize().map_err(|error| {
         BoxliteError::InvalidArgument(format!("invalid archive box_options: {error}"))
     })?;
@@ -238,6 +253,44 @@ mod tests {
             container_disk_checksum: String::new(),
             exported_at: "2026-07-26T00:00:00Z".to_string(),
         }
+    }
+
+    fn loopback_port() -> crate::runtime::options::PortSpec {
+        crate::runtime::options::PortSpec {
+            host_port: Some(18080),
+            guest_port: 80,
+            protocol: crate::runtime::options::PortProtocol::Tcp,
+            host_ip: Some("127.0.0.1".to_string()),
+        }
+    }
+
+    /// The importer's canonicalization window is the other half of the archive
+    /// version contract: below v5 a mapping predates publication semantics and
+    /// must be rewritten, at v5 it carries them and must be left exactly alone.
+    /// A window that swallowed v5 would clear `host_ip` and turn a loopback
+    /// publication into one on every interface.
+    #[test]
+    fn canonicalization_window_stops_at_the_published_ports_version() {
+        let options = BoxOptions {
+            ports: vec![loopback_port()],
+            ..Default::default()
+        };
+
+        let mut legacy = v3_manifest(options.clone());
+        legacy.version = PUBLISHED_PORTS_ARCHIVE_VERSION - 1;
+        let rewritten = options_from_manifest(&legacy, ArchiveImportPolicy::Trusted).unwrap();
+        assert_eq!(
+            rewritten.ports[0].host_ip, None,
+            "a pre-publication archive never meant its bind IP"
+        );
+
+        let mut current = v3_manifest(options.clone());
+        current.version = PUBLISHED_PORTS_ARCHIVE_VERSION;
+        let preserved = options_from_manifest(&current, ArchiveImportPolicy::Trusted).unwrap();
+        assert_eq!(
+            preserved.ports, options.ports,
+            "a v5 archive carries publication semantics and must survive import intact"
+        );
     }
 
     #[test]

@@ -244,6 +244,7 @@ mod tests {
             image: "alpine:latest".into(),
             cpus: 1,
             memory_mib: 512,
+            network: None,
             labels: HashMap::new(),
             auto_pause: 0,
             auto_delete: 0,

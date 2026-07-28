@@ -584,7 +584,7 @@ impl RuntimeImpl {
     /// Checks in-memory cache first (for boxes not yet persisted), then database.
     pub async fn get_info(self: &Arc<Self>, id_or_name: &str) -> BoxliteResult<Option<BoxInfo>> {
         // Check in-memory cache first (for boxes created but not yet persisted)
-        {
+        let cached_box = {
             let sync = self.sync_state.read().unwrap();
 
             // Try as BoxID first
@@ -592,15 +592,16 @@ impl RuntimeImpl {
                 && let Some(weak) = sync.active_boxes_by_id.get(&box_id)
                 && let Some(strong) = weak.upgrade()
             {
-                return Ok(Some(strong.info()));
+                Some(strong)
+            } else if let Some(weak) = sync.active_boxes_by_name.get(id_or_name) {
+                weak.upgrade()
+            } else {
+                None
             }
+        };
 
-            // Try as name
-            if let Some(weak) = sync.active_boxes_by_name.get(id_or_name)
-                && let Some(strong) = weak.upgrade()
-            {
-                return Ok(Some(strong.info()));
-            }
+        if let Some(box_impl) = cached_box {
+            return Ok(Some(box_impl.info()));
         }
 
         // Fall back to DB lookup - run on blocking thread pool
@@ -611,10 +612,7 @@ impl RuntimeImpl {
                 .await
                 .map_err(|e| BoxliteError::Internal(format!("spawn_blocking failed: {}", e)))??;
 
-        if let Some((config, state)) = db_result {
-            return Ok(Some(BoxInfo::new(&config, &state)));
-        }
-        Ok(None)
+        Ok(db_result.map(|(config, state)| BoxInfo::new(&config, &state)))
     }
 
     /// List all boxes, sorted by creation time (newest first).
@@ -630,24 +628,27 @@ impl RuntimeImpl {
             .await
             .map_err(|e| BoxliteError::Internal(format!("spawn_blocking failed: {}", e)))??;
 
-        let mut seen_ids: HashSet<BoxID> = db_boxes.iter().map(|(c, _)| c.id.clone()).collect();
-        let mut infos: Vec<_> = db_boxes
-            .into_iter()
-            .map(|(config, state)| BoxInfo::new(&config, &state))
-            .collect();
-
-        // Add in-memory boxes not yet persisted
-        {
-            let sync = self.sync_state.read().unwrap();
-            for (box_id, weak) in &sync.active_boxes_by_id {
-                if !seen_ids.contains(box_id)
-                    && let Some(strong) = weak.upgrade()
-                {
-                    infos.push(strong.info());
-                    seen_ids.insert(box_id.clone());
-                }
-            }
+        let mut seen_ids = HashSet::with_capacity(db_boxes.len());
+        let mut infos = Vec::with_capacity(db_boxes.len());
+        for (config, state) in db_boxes {
+            seen_ids.insert(config.id.clone());
+            // Database rows are the cross-process freshness authority. Build
+            // their metadata directly instead of manufacturing live handles.
+            infos.push(BoxInfo::new(&config, &state));
         }
+
+        // Add in-memory boxes not yet persisted. `info()` reads the box's
+        // shim.pid, so collect the handles first rather than doing that file
+        // I/O while holding the cache lock.
+        let in_memory_only: Vec<_> = {
+            let sync = self.sync_state.read().unwrap();
+            sync.active_boxes_by_id
+                .iter()
+                .filter(|(box_id, _)| !seen_ids.contains(*box_id))
+                .filter_map(|(_, weak)| weak.upgrade())
+                .collect()
+        };
+        infos.extend(in_memory_only.iter().map(|box_impl| box_impl.info()));
 
         // Sort by creation time (newest first)
         infos.sort_by_key(|b| std::cmp::Reverse(b.created_at));
@@ -1983,6 +1984,15 @@ mod tests {
         (pid, child)
     }
 
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
     /// Spawn a process that ignores SIGTERM (for force-kill testing).
     fn spawn_sigterm_ignoring_process() -> (u32, std::process::Child) {
         let child = std::process::Command::new("sh")
@@ -2017,6 +2027,64 @@ mod tests {
             engine_kind: VmmKind::Libkrun,
             box_home,
         }
+    }
+
+    #[tokio::test]
+    async fn get_info_does_not_create_cached_box_handle() {
+        let (runtime, _dir) = create_test_runtime();
+        let config = test_box_config(false);
+        let state = BoxState::new();
+        runtime
+            .box_manager
+            .add_box(&config, &state)
+            .expect("Failed to add box");
+
+        let is_cached = || {
+            runtime
+                .sync_state
+                .read()
+                .unwrap()
+                .active_boxes_by_id
+                .contains_key(&config.id)
+        };
+        assert!(!is_cached());
+
+        let info = runtime
+            .get_info(config.id.as_str())
+            .await
+            .expect("Failed to query box info")
+            .expect("Box info must exist");
+
+        assert_eq!(info.id, config.id);
+        assert!(!is_cached(), "metadata lookup must not cache a live handle");
+    }
+
+    #[tokio::test]
+    async fn list_info_prefers_fresh_database_state_over_cached_box() {
+        let (runtime, _dir) = create_test_runtime();
+        let config = test_box_config(false);
+        let cached_state = BoxState::new();
+        runtime
+            .box_manager
+            .add_box(&config, &cached_state)
+            .expect("Failed to add box");
+
+        let (cached_box, inserted) = runtime.get_or_create_box_impl(config.clone(), cached_state);
+        assert!(inserted);
+        assert_eq!(cached_box.info().status, BoxStatus::Configured);
+
+        let mut fresh_state = BoxState::new();
+        fresh_state.status = BoxStatus::Stopped;
+        runtime
+            .box_manager
+            .save_box(&config.id, &fresh_state)
+            .expect("Failed to update box state");
+
+        let infos = runtime.list_info().await.expect("Failed to list box info");
+
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].status, BoxStatus::Stopped);
+        assert_eq!(cached_box.info().status, BoxStatus::Configured);
     }
 
     // ====================================================================
@@ -2533,6 +2601,43 @@ mod tests {
         }
         let st = crate::util::process_start_time(pid).expect("OS reports start_time");
         std::fs::write(pid_file, format!("{pid}\n{st}\n")).expect("write shim.pid");
+    }
+
+    #[test]
+    fn test_recovery_promotes_configured_box_with_verified_live_shim() {
+        let (runtime, _dir) = create_test_runtime();
+        let (pid, child) = spawn_dummy_process();
+        let child = ChildGuard(child);
+        let config = test_box_config_in_layout(false, &runtime);
+        let state = BoxState::new();
+
+        let layout = runtime
+            .layout
+            .box_layout(config.id.as_str(), false)
+            .expect("box_layout is infallible");
+        let pid_file = layout.pid_file_path();
+        write_pid_file_with_fingerprint(&pid_file, pid);
+
+        runtime
+            .box_manager
+            .add_box(&config, &state)
+            .expect("Failed to add box");
+
+        let (_, persisted_before) = runtime.box_manager.box_by_id(&config.id).unwrap().unwrap();
+        assert_eq!(persisted_before.status, BoxStatus::Configured);
+        assert!(persisted_before.pid.is_none());
+
+        runtime.recover_boxes().expect("Failed to recover boxes");
+
+        let (_, recovered) = runtime.box_manager.box_by_id(&config.id).unwrap().unwrap();
+        assert_eq!(recovered.status, BoxStatus::Running);
+        assert_eq!(recovered.pid, Some(pid));
+        assert!(
+            crate::util::is_process_alive(pid),
+            "Recovery must adopt, not stop, the verified live shim"
+        );
+
+        drop(child);
     }
 
     #[tokio::test]

@@ -31,6 +31,18 @@ impl RestRuntime {
     }
 }
 
+fn validate_remote_box_options(options: &BoxOptions) -> BoxliteResult<()> {
+    if options.ports.is_empty() {
+        return Ok(());
+    }
+
+    Err(BoxliteError::Unsupported(
+        "Host port publication (-p/ports) is local-only for remote runtimes. \
+         Use box.network.tunnel(port) or `boxlite network tunnel BOX PORT` instead."
+            .to_string(),
+    ))
+}
+
 #[async_trait::async_trait]
 impl AuthBackend for RestRuntime {
     async fn whoami(&self) -> BoxliteResult<Principal> {
@@ -99,6 +111,7 @@ fn reject_remote_experimental_options(options: &BoxOptions) -> BoxliteResult<()>
 #[async_trait::async_trait]
 impl RuntimeBackend for RestRuntime {
     async fn create(&self, options: BoxOptions, name: Option<String>) -> BoxliteResult<LiteBox> {
+        validate_remote_box_options(&options)?;
         reject_remote_experimental_options(&options)?;
 
         // Validate only the caller's requested policy. An unset auto_pause means
@@ -130,6 +143,7 @@ impl RuntimeBackend for RestRuntime {
         options: BoxOptions,
         name: Option<String>,
     ) -> BoxliteResult<(LiteBox, bool)> {
+        validate_remote_box_options(&options)?;
         reject_remote_experimental_options(&options)?;
 
         // Try to get existing box by name first
@@ -256,6 +270,26 @@ fn runtime_metrics_from_response(resp: &RuntimeMetricsResponse) -> RuntimeMetric
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::options::{PortProtocol, PortSpec};
+
+    #[test]
+    fn remote_runtime_rejects_host_port_publication_with_tunnel_guidance() {
+        let options = BoxOptions {
+            ports: vec![PortSpec {
+                host_port: None,
+                guest_port: 3000,
+                protocol: PortProtocol::Tcp,
+                host_ip: None,
+            }],
+            ..Default::default()
+        };
+
+        let err = validate_remote_box_options(&options).unwrap_err();
+        assert!(err.to_string().contains("-p/ports"));
+        assert!(err.to_string().contains("network.tunnel"));
+        assert!(err.to_string().contains("boxlite network tunnel"));
+    }
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 

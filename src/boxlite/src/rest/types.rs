@@ -301,6 +301,10 @@ impl BoxResponse {
             image: self.image.clone(),
             cpus: self.cpus,
             memory_mib: self.memory_mib,
+            // The remote REST surface intentionally does not publish local
+            // host bindings. Missing network metadata is therefore distinct
+            // from a locally verified, resolved-empty publication list.
+            network: None,
             labels: self.labels.clone(),
             auto_pause: self.auto_pause,
             auto_delete: self.auto_delete,
@@ -563,6 +567,7 @@ fn parse_box_status(status: &str) -> BoxStatus {
         "stopping" => BoxStatus::Stopping,
         "stopped" => BoxStatus::Stopped,
         "paused" => BoxStatus::Paused,
+        "failed" => BoxStatus::Failed,
         _ => BoxStatus::Unknown,
     }
 }
@@ -810,6 +815,7 @@ mod tests {
         assert_eq!(info.image, "python:3.11");
         assert_eq!(info.cpus, 2);
         assert_eq!(info.memory_mib, 512);
+        assert!(info.network.is_none());
         assert_eq!(info.auto_pause, 1800);
         assert_eq!(info.auto_delete, 604800);
     }

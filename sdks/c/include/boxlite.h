@@ -64,17 +64,23 @@ typedef enum BoxliteErrorCode {
   SessionReaped = 21,
 } BoxliteErrorCode;
 
-// The kind of endpoint exposed by a box tunnel.
-typedef enum BoxliteEndpointType {
-  BoxliteEndpointTypeUri = 0,
-  BoxliteEndpointTypeFileDescriptor = 1,
-} BoxliteEndpointType;
+// Network mode exposed by [`CNetworkInfo`].
+typedef enum BoxliteNetworkMode {
+  BoxliteNetworkModeEnabled = 0,
+  BoxliteNetworkModeDisabled = 1,
+} BoxliteNetworkMode;
 
 // Transport protocol for a port forwarding rule.
 typedef enum BoxlitePortProtocol {
   BoxlitePortProtocolTcp = 0,
   BoxlitePortProtocolUdp = 1,
 } BoxlitePortProtocol;
+
+// The kind of endpoint exposed by a box tunnel.
+typedef enum BoxliteEndpointType {
+  BoxliteEndpointTypeUri = 0,
+  BoxliteEndpointTypeFileDescriptor = 1,
+} BoxliteEndpointType;
 
 typedef enum BoxliteRegistryTransport {
   BoxliteRegistryTransportHttps = 0,
@@ -264,6 +270,39 @@ typedef struct CImageInfoList {
 // Image list completion.
 typedef void (*CBoxImageListCb)(struct CImageInfoList*, CBoxliteError*, void*);
 
+// A concrete host listener published to a guest port.
+//
+// `host_ip` is owned by the enclosing [`CBoxInfo`].
+typedef struct CPublishedPort {
+  uint16_t guest_port;
+  char *host_ip;
+  uint16_t host_port;
+  enum BoxlitePortProtocol protocol;
+} CPublishedPort;
+
+// Owned list of concrete published ports.
+//
+// A non-null list with `count == 0` means publication metadata was resolved
+// and no listeners are active. The list is owned by its enclosing
+// [`CNetworkInfo`].
+typedef struct CPublishedPortList {
+  struct CPublishedPort *items;
+  int count;
+} CPublishedPortList;
+
+// Typed network metadata owned by an enclosing [`CBoxInfo`].
+//
+// `allow_net` points to `allow_net_count` owned strings. `published_ports`
+// is null when the current handle does not know the bindings, non-null and
+// empty when there are no active publications, and otherwise contains
+// concrete bindings.
+typedef struct CNetworkInfo {
+  enum BoxliteNetworkMode mode;
+  char **allow_net;
+  int allow_net_count;
+  struct CPublishedPortList *published_ports;
+} CNetworkInfo;
+
 typedef struct CBoxInfo {
   char *id;
   char *name;
@@ -277,9 +316,13 @@ typedef struct CBoxInfo {
   uint32_t auto_delete;
   int auto_resume;
   int64_t created_at;
+  // Owned typed network metadata; null when network metadata is unavailable.
+  struct CNetworkInfo *network;
 } CBoxInfo;
 
-// Box info completion.
+// Box info completion. On success the callback owns the non-null metadata and
+// must release it with `boxlite_free_box_info`. The error pointer is borrowed
+// for callback dispatch only; on failure the metadata pointer is null.
 typedef void (*CBoxInfoCb)(struct CBoxInfo*, CBoxliteError*, void*);
 
 typedef struct CBoxInfoList {
@@ -587,7 +630,8 @@ void boxlite_free_image_info_list(struct CImageInfoList *list);
 void boxlite_free_image_pull_result(struct CImagePullResult *result);
 
 enum BoxliteErrorCode boxlite_box_info(CBoxHandle *handle,
-                                       struct CBoxInfo **out_info,
+                                       CBoxInfoCb cb,
+                                       void *user_data,
                                        CBoxliteError *out_error);
 
 enum BoxliteErrorCode boxlite_get_info(CBoxliteRuntime *runtime,
@@ -687,7 +731,7 @@ void boxlite_options_add_volume(CBoxliteOptions *opts,
 
 // Forward `host_port` on the host to `guest_port` inside the box.
 //
-// - `host_port`: 0 = use the same number as `guest_port`.
+// - `host_port`: 0 = let the OS select an available host port.
 // - `guest_port`: required, 1-65535.
 // - `host_ip`: bind address; NULL or "" = all host interfaces.
 //

@@ -1494,7 +1494,7 @@ components:
     # =======================================================================
     Box:
       type: object
-      description: Box metadata (maps to BoxInfo)
+      description: REST box metadata
       required: [box_id, status, created_at, updated_at, image, cpus, memory_mib]
       properties:
         box_id:
@@ -1573,6 +1573,7 @@ components:
         - `stopping`: Graceful shutdown in progress (transient)
         - `stopped`: VM terminated, can be restarted
         - `paused`: VM frozen via SIGSTOP (during snapshot/export)
+        - `failed`: Initialization failed; diagnostic state is retained
         - `unknown`: Error recovery state
       enum:
         - configured
@@ -1580,11 +1581,16 @@ components:
         - stopping
         - stopped
         - paused
+        - failed
         - unknown
 
     CreateBoxRequest:
       type: object
-      description: Configuration for creating a new box.
+      description: |
+        REST-supported configuration for creating a new box. Host port
+        publication is intentionally absent; use the box network tunnel
+        endpoint for remote service access.
+      additionalProperties: false
       properties:
         advanced:
           $ref: "#/components/schemas/CreateBoxAdvancedOptions"
@@ -1651,10 +1657,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/VolumeSpec"
-        ports:
-          type: array
-          items:
-            $ref: "#/components/schemas/PortSpec"
         network:
           $ref: "#/components/schemas/NetworkSpec"
         secrets:
@@ -1749,29 +1751,6 @@ components:
             Optional outbound allowlist used only when `mode=enabled`.
             Empty or omitted means full outbound access.
             Supports hostnames, wildcard hostnames, IPs, and CIDRs.
-
-    PortSpec:
-      type: object
-      description: Port forwarding rule (host → guest)
-      required: [guest_port]
-      properties:
-        host_port:
-          type: integer
-          minimum: 0
-          maximum: 65535
-          description: Host port (0 or omit for dynamic assignment)
-        guest_port:
-          type: integer
-          minimum: 1
-          maximum: 65535
-          description: Container port to expose
-        protocol:
-          type: string
-          enum: [tcp, udp]
-          default: tcp
-        host_ip:
-          type: string
-          description: Host IP to bind (defaults to 0.0.0.0)
 
     SecretSpec:
       type: object
