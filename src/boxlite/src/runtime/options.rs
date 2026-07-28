@@ -322,6 +322,7 @@ pub struct BoxOptions {
     /// If set, the COW overlay will have this virtual size, allowing
     /// the container to write more data than the base image size.
     pub disk_size_gb: Option<u64>,
+
     pub working_dir: Option<String>,
     pub env: Vec<(String, String)>,
     pub rootfs: RootfsSpec,
@@ -744,6 +745,12 @@ pub struct PortSpec {
     pub host_ip: Option<String>, // Optional bind IP, defaults to 0.0.0.0/:: if None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArchiveImportPolicy {
+    Trusted,
+    UntrustedRemote,
+}
+
 /// A portable box archive (`.boxlite` file).
 ///
 /// Self-contained bundle: disk images + configuration manifest.
@@ -751,17 +758,43 @@ pub struct PortSpec {
 #[derive(Debug, Clone)]
 pub struct BoxArchive {
     path: PathBuf,
+    import_policy: ArchiveImportPolicy,
 }
 
 impl BoxArchive {
-    /// Create a BoxArchive handle from an archive file path.
+    /// Create a trusted `BoxArchive` handle from an archive file path.
+    ///
+    /// This preserves all v3 archive configuration and is intended for local
+    /// import/export workflows where the caller owns both the archive and the
+    /// runtime.
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            import_policy: ArchiveImportPolicy::Trusted,
+        }
+    }
+
+    /// Create an archive handle for bytes received across an untrusted server
+    /// boundary.
+    ///
+    /// Remote import rejects host-only features and host filesystem paths, then
+    /// replaces archive-carried security settings with the runtime's secure
+    /// defaults. HTTP servers must use this constructor rather than
+    /// [`BoxArchive::new`].
+    pub fn from_untrusted_upload(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            import_policy: ArchiveImportPolicy::UntrustedRemote,
+        }
     }
 
     /// Path to the archive file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub(crate) fn import_policy(&self) -> ArchiveImportPolicy {
+        self.import_policy
     }
 }
 
@@ -1075,6 +1108,22 @@ mod tests {
         let opts: BoxOptions = serde_json::from_str(json).unwrap();
         assert_eq!(opts.auto_delete, Some(0));
         assert!(opts.detach, "explicit detach=true should be respected");
+    }
+
+    /// The opt-in is persisted with the box and rechecked on every start, so it
+    /// has to survive a manifest round-trip — and default to off when absent.
+    #[test]
+    fn nested_virtualization_option_roundtrips() {
+        let stored: BoxOptions =
+            serde_json::from_str(r#"{"advanced":{"nested_virtualization":true}}"#).unwrap();
+        assert!(stored.advanced.nested_virtualization);
+        assert_eq!(
+            serde_json::to_value(stored).unwrap()["advanced"]["nested_virtualization"],
+            serde_json::Value::Bool(true)
+        );
+
+        let legacy: BoxOptions = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.advanced.nested_virtualization);
     }
 
     #[test]

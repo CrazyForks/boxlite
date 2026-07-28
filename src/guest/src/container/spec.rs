@@ -4,12 +4,14 @@
 
 use super::capabilities::CapabilitySet;
 use boxlite_shared::errors::{BoxliteError, BoxliteResult};
-use std::path::Path;
+use boxlite_shared::ContainerDevice as ProtoContainerDevice;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::path::{Component, Path, PathBuf};
 
 use oci_spec::runtime::{
-    LinuxBuilder, LinuxIdMappingBuilder, LinuxNamespaceBuilder, LinuxNamespaceType, Mount,
-    MountBuilder, PosixRlimitBuilder, PosixRlimitType, ProcessBuilder, RootBuilder, Spec,
-    SpecBuilder, UserBuilder,
+    LinuxBuilder, LinuxDevice, LinuxDeviceBuilder, LinuxDeviceType, LinuxIdMappingBuilder,
+    LinuxNamespaceBuilder, LinuxNamespaceType, Mount, MountBuilder, PosixRlimitBuilder,
+    PosixRlimitType, ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
 };
 
 /// User-specified bind mount for container
@@ -25,6 +27,112 @@ pub struct UserMount {
     pub owner_uid: u32,
     /// Owner GID of host directory (for auto-idmap)
     pub owner_gid: u32,
+}
+
+/// Device nodes the host asked to republish inside the container, resolved
+/// against the guest VM's own `/dev` and validated on the way in.
+#[derive(Debug, Default)]
+pub struct ContainerDevices(Vec<LinuxDevice>);
+
+impl ContainerDevices {
+    pub fn from_proto(devices: Vec<ProtoContainerDevice>) -> BoxliteResult<Self> {
+        devices
+            .into_iter()
+            .map(resolve_device)
+            .collect::<BoxliteResult<Vec<_>>>()
+            .map(Self)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn as_slice(&self) -> &[LinuxDevice] {
+        &self.0
+    }
+}
+
+/// Read a guest device node's type and numbers, and describe it as the OCI
+/// device the container should get.
+fn resolve_device(device: ProtoContainerDevice) -> BoxliteResult<LinuxDevice> {
+    // Both ends are confined: the source names a node this guest already
+    // publishes under /dev, and the destination names where the workload sees
+    // it. Confining only one end would let a caller read a device node from
+    // anywhere in the guest filesystem.
+    let source = validate_device_path("source", &device.source)?;
+    let destination = validate_device_path("destination", &device.destination)?;
+    if let Some(file_mode) = device.file_mode {
+        if file_mode & !0o777 != 0 {
+            return Err(unsupported_device(
+                &destination,
+                format!("has invalid file mode {file_mode:#o}"),
+            ));
+        }
+    }
+
+    let metadata = std::fs::symlink_metadata(&source)
+        .map_err(|error| unsupported_device(&source, format!("is unavailable: {error}")))?;
+    let typ = if metadata.file_type().is_char_device() {
+        LinuxDeviceType::C
+    } else if metadata.file_type().is_block_device() {
+        LinuxDeviceType::B
+    } else {
+        return Err(unsupported_device(
+            &source,
+            "is not a character or block device".to_string(),
+        ));
+    };
+    let rdev = metadata.rdev();
+    let (Ok(major), Ok(minor)) = (
+        i64::try_from(nix::sys::stat::major(rdev)),
+        i64::try_from(nix::sys::stat::minor(rdev)),
+    ) else {
+        return Err(unsupported_device(
+            &source,
+            "has unsupported device numbers".to_string(),
+        ));
+    };
+
+    let mut builder = LinuxDeviceBuilder::default()
+        .path(&destination)
+        .typ(typ)
+        .major(major)
+        .minor(minor)
+        .uid(0u32)
+        .gid(0u32);
+    if let Some(file_mode) = device.file_mode {
+        builder = builder.file_mode(file_mode);
+    }
+
+    builder
+        .build()
+        .map_err(|error| unsupported_device(&destination, format!("is not mappable: {error}")))
+}
+
+fn unsupported_device(path: &Path, problem: String) -> BoxliteError {
+    BoxliteError::Unsupported(format!("container device {} {problem}", path.display()))
+}
+
+/// A device path must be absolute, free of `.`/`..`, and name something strictly
+/// below `/dev` — never `/dev` itself, which is the directory, not a node.
+fn validate_device_path(field: &str, value: &str) -> BoxliteResult<PathBuf> {
+    let path = Path::new(value);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(BoxliteError::Unsupported(format!(
+            "container device {field} must be a normalized absolute path: {value}"
+        )));
+    }
+    if path == Path::new("/dev") || !path.starts_with("/dev") {
+        return Err(BoxliteError::Unsupported(format!(
+            "container device {field} must be below /dev: {value}"
+        )));
+    }
+
+    Ok(path.to_path_buf())
 }
 
 /// Create OCI runtime specification with default configuration
@@ -56,6 +164,7 @@ pub fn create_oci_spec(
     bundle_path: &Path,
     user_mounts: &[UserMount],
     tty: bool,
+    devices: &ContainerDevices,
 ) -> BoxliteResult<Spec> {
     let caps = capabilities.to_oci()?;
     let namespaces = build_default_namespaces()?;
@@ -94,7 +203,7 @@ pub fn create_oci_spec(
 
     let process = build_process_spec(entrypoint, env, workdir, uid, gid, caps, tty)?;
     let root = build_root_spec(rootfs)?;
-    let linux = build_linux_spec(container_id, namespaces)?;
+    let linux = build_linux_spec(container_id, namespaces, devices.as_slice())?;
 
     SpecBuilder::default()
         .version("1.0.2")
@@ -378,6 +487,7 @@ fn build_root_spec(rootfs: &str) -> BoxliteResult<oci_spec::runtime::Root> {
 fn build_linux_spec(
     container_id: &str,
     namespaces: Vec<oci_spec::runtime::LinuxNamespace>,
+    devices: &[LinuxDevice],
 ) -> BoxliteResult<oci_spec::runtime::Linux> {
     // UID/GID mappings for user namespace
     // Map full range of UIDs/GIDs to allow non-root users (nginx=33, etc.)
@@ -425,10 +535,17 @@ fn build_linux_spec(
     // let cgroups_path = format!("/boxlite/{}", container_id);
     let _ = container_id; // Suppress unused warning
 
-    LinuxBuilder::default()
+    let mut builder = LinuxBuilder::default()
         .namespaces(namespaces)
         .uid_mappings(uid_mappings)
-        .gid_mappings(gid_mappings)
+        .gid_mappings(gid_mappings);
+
+    // Leave `devices` unset when empty so the spec keeps its historical shape.
+    if !devices.is_empty() {
+        builder = builder.devices(devices.to_vec());
+    }
+
+    builder
         // .masked_paths(masked_paths)
         // .readonly_paths(readonly_paths)
         // .cgroups_path(cgroups_path)
@@ -576,6 +693,94 @@ mod tests {
     use super::*;
     use crate::container::capabilities::CapabilitySet;
     use std::fs;
+
+    /// The device the container sees must carry the *source* node's type and
+    /// numbers, read from the guest VM, under the requested destination path.
+    #[test]
+    fn device_mapping_resolves_the_source_node() {
+        let source = fs::metadata("/dev/null").unwrap().rdev();
+        let devices = ContainerDevices::from_proto(vec![ProtoContainerDevice {
+            source: "/dev/null".to_string(),
+            destination: "/dev/test-device".to_string(),
+            file_mode: Some(0o666),
+        }])
+        .unwrap();
+
+        let linux = build_linux_spec("test-box", vec![], devices.as_slice()).unwrap();
+        let mapped = linux.devices().as_ref().expect("mapped device");
+        assert_eq!(mapped.len(), 1);
+        let device = &mapped[0];
+        assert_eq!(device.path(), Path::new("/dev/test-device"));
+        assert_eq!(device.typ(), LinuxDeviceType::C);
+        assert_eq!(device.major() as u64, nix::sys::stat::major(source));
+        assert_eq!(device.minor() as u64, nix::sys::stat::minor(source));
+        assert_eq!(device.file_mode(), Some(0o666));
+        assert_eq!(device.uid(), Some(0));
+        assert_eq!(device.gid(), Some(0));
+    }
+
+    #[test]
+    fn empty_device_mapping_adds_no_devices() {
+        let linux =
+            build_linux_spec("test-box", vec![], ContainerDevices::default().as_slice()).unwrap();
+
+        assert!(linux.devices().is_none());
+    }
+
+    #[test]
+    fn device_mapping_rejects_unusable_requests() {
+        let regular_file = tempfile::NamedTempFile::new().unwrap();
+        let cases = [
+            // A directory, so it clears the /dev confinement and is refused by
+            // the node-type check instead. If a runner lacks /dev/shm the error
+            // becomes "is unavailable" and this case fails loudly rather than
+            // passing for the wrong reason.
+            (
+                "not a character or block device",
+                "/dev/shm".to_string(),
+                "/dev/test-device".to_string(),
+                None,
+            ),
+            // Source is confined too, so a path outside /dev is refused before
+            // its node type is ever inspected.
+            (
+                "source must be below /dev",
+                regular_file.path().display().to_string(),
+                "/dev/test-device".to_string(),
+                None,
+            ),
+            (
+                "must be below /dev",
+                "/dev/null".to_string(),
+                "/tmp/test-device".to_string(),
+                None,
+            ),
+            (
+                "normalized absolute path",
+                "/dev/null".to_string(),
+                "/dev/../etc/passwd".to_string(),
+                None,
+            ),
+            (
+                "invalid file mode",
+                "/dev/null".to_string(),
+                "/dev/test-device".to_string(),
+                Some(0o4666),
+            ),
+        ];
+
+        for (expected, source, destination, file_mode) in cases {
+            let error = ContainerDevices::from_proto(vec![ProtoContainerDevice {
+                source,
+                destination,
+                file_mode,
+            }])
+            .unwrap_err();
+
+            assert!(matches!(error, BoxliteError::Unsupported(_)), "{error:?}");
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+    }
 
     /// Create a temp rootfs with /etc/passwd and /etc/group for testing.
     ///

@@ -5,7 +5,7 @@
 
 use super::capabilities::CapabilitySet;
 use super::command::ContainerCommand;
-use super::spec::UserMount;
+use super::spec::{ContainerDevices, UserMount};
 use super::stdio::{ContainerStdio, InitIo};
 use super::{console_socket, kill, spec, start};
 use crate::layout::GuestLayout;
@@ -111,6 +111,7 @@ impl Container {
         user_mounts: Vec<UserMount>,
         tty: bool,
         capabilities: CapabilitySet,
+        devices: ContainerDevices,
     ) -> BoxliteResult<Self> {
         let rootfs = rootfs.as_ref();
         let workdir = workdir.as_ref();
@@ -187,6 +188,7 @@ impl Container {
             &layout.containers_dir(),
             &user_mounts,
             tty,
+            &devices,
         )?;
 
         let stdio = if tty {
