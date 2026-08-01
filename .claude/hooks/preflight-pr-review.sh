@@ -26,6 +26,11 @@
 #   arbitrary string is rare and the failure mode is "let one PR through
 #   without ack," not a destructive action.
 #
+# * Two deterministic content checks run before the ack gate — a Conventional-
+#   Commit `--title`, and a `--body` carrying the before/after call graph
+#   (CONTRIBUTING.md #commit--pr-messages). Both only fire when the flag is
+#   actually present and inspectable; neither consumes the ack marker.
+#
 # * One-shot consumption: the marker file is `rm -f`'d on the allow path so
 #   each successive gh pr command forces a fresh ack, even at the same HEAD.
 #   Mirrors the trade-off in preflight-commit-push.sh.
@@ -109,6 +114,153 @@ if [[ -n "$pr_title" ]]; then
   types: feat fix docs refactor test chore perf ci build
 
 Fix --title and retry. See CONTRIBUTING.md #commit--pr-messages."
+  fi
+fi
+
+# Deterministic body check: a supplied PR body must carry the before/after
+# end-to-end call graph mandated by CONTRIBUTING.md #commit--pr-messages.
+#
+# Only inspected when the command actually supplies a body. `gh pr ready` and
+# editor-driven `gh pr create` carry nothing to read, and the editor path opens
+# .github/pull_request_template.md, which already holds the section.
+pr_body=""
+body_supplied=0
+if [[ "$command" =~ (^|[[:space:]])(--body-file|-F)[[:space:]]+([^[:space:]]+) ]]; then
+  body_supplied=1
+  body_path="${BASH_REMATCH[3]//[\"\']/}"
+  [[ -r "$body_path" ]] && pr_body="$(cat "$body_path")"
+elif [[ "$command" =~ (^|[[:space:]])(--body|-b)[[:space:]]+\"([^\"]*)\" ]]; then
+  # Covers both `--body "…"` and `--body "$(cat <<'EOF' … EOF)"`: the capture stops
+  # at the next `"`, so a body containing a double quote truncates and fails the
+  # checks below — closed, not open.
+  body_supplied=1
+  pr_body="${BASH_REMATCH[3]}"
+elif [[ "$command" =~ (^|[[:space:]])(--body|-b)[[:space:]]+\'([^\']*)\' ]]; then
+  body_supplied=1
+  pr_body="${BASH_REMATCH[3]}"
+elif [[ "$command" =~ (^|[[:space:]])(--body|-b|--fill|--fill-first|--fill-verbose|-f)([[:space:]]|=|$) ]]; then
+  # A body flag we cannot read (unquoted `--body`), or `--fill`, which supplies no
+  # body of its own — commit text is not a PR description.
+  body_supplied=1
+  pr_body="$command"
+fi
+
+if (( body_supplied )); then
+  # Line-start anchors below: an extracted body begins mid-line, glued to the flag.
+  pr_body=$'\n'"$pr_body"
+  body_lc="$(tr '[:upper:]' '[:lower:]' <<<"$pr_body")"
+  # Herestrings, not pipes: `grep -q` exits on first match and would SIGPIPE the
+  # writer, which `set -o pipefail` would then read as a failed check.
+  has_line() { grep -qE "$1" <<<"$body_lc"; }
+  missing=""
+
+  has_line '^[[:space:]]*#{2,}[[:space:]]*call[[:space:]]+graph[[:space:]]*$' \
+    || missing+="
+  - a '## Call graph' section"
+  # Shared with the section extractor below, so the header shape can never
+  # drift between "is there a Before label" and "where does Before end".
+  before_re='^[[:space:]]*before([[:space:]]|:|$)'
+  after_re='^[[:space:]]*after([[:space:]]|:|$)'
+  has_line "$before_re" \
+    || missing+="
+  - a 'Before' graph"
+  has_line "$after_re" \
+    || missing+="
+  - an 'After' graph"
+
+  # Lines strictly between a graph's header and whichever comes first: the
+  # other graph's header, or the next markdown heading. Rule order is
+  # load-bearing: reset on a stop, then print, then set on the header — that
+  # sequence is what keeps the header lines themselves out of the section, so a
+  # marker on the `Before` line marks no hop.
+  #
+  # Only the heading stop is fence-aware. Graphs get drawn inside a ``` fence,
+  # where a `## entry` line is drawing rather than structure, and honouring it
+  # stranded every hop that followed. The graph labels are honoured fenced or
+  # not, because CONTRIBUTING.md's own example wraps both labels and all their
+  # hops in a single fence — gating the labels the same way left that example
+  # extracting to nothing and denied for having no hops at all.
+  section() {
+    awk -v start_re="$1" -v stop_re="$2" '
+      /^[[:space:]]*```/                        { fenced = !fenced }
+      $0 ~ stop_re && in_section                { in_section = 0 }
+      !fenced && /^[[:space:]]*##/ && in_section { in_section = 0 }
+      in_section                                { print }
+      $0 ~ start_re                             { in_section = 1 }
+    ' <<<"$body_lc"
+  }
+  before_graph="$(section "$before_re" "$after_re")"
+  after_graph="$(section "$after_re" "$before_re")"
+
+  # Each graph needs a hop of its own, shaped like the documented
+  # `fn_name (Type · path/file.ext:LOC)`. Matching a bare `file.ext:LOC` was
+  # too loose — one occurs mid-sentence — so a paragraph mentioning a file in
+  # passing counted as a graph.
+  #
+  # What it actually requires: a `(` to the left of the reference and a `)` to
+  # the right. Not a balanced group, and neither side is stricter than the
+  # other. Being permissive is deliberate — a Type half carries its own
+  # parentheses in `(fn(u32) -> u32 · src/x.rs:5)`, and refusing to cross them
+  # denied a hop conforming to CONTRIBUTING.md's documented shape. The cost is
+  # that an unrelated parenthetical straddling the reference also satisfies it.
+  #
+  # So this only reaches "shaped like a hop". It cannot tell a real graph from
+  # a fabricated one, and no pattern here could — that judgment is left to the
+  # human on the typed `reviewed:` ack below.
+  #
+  # Per graph, not body-wide: a body-wide count lets a prose-only After ride
+  # along on Before's hops, which is not an end-to-end before/after graph. It
+  # is also what an unfilled template cannot fake — its labels are literal
+  # text, but its hop lines are HTML comments.
+  hop_re='\(.*[A-Za-z0-9_./-]+\.[A-Za-z]+:[0-9]+.*\)'
+  before_hops="$(grep -cE "$hop_re" <<<"$before_graph" || true)"
+  after_hops="$(grep -cE "$hop_re" <<<"$after_graph" || true)"
+  # Reports what is checked — a parenthesised reference — rather than naming
+  # parts (`fn_name`, `Type`) the pattern does not require; the canonical shape
+  # is printed in full below.
+  (( before_hops >= 1 && after_hops >= 1 )) \
+    || missing+="
+  - a hop line with a parenthesised 'path/file.ext:LOC' in each graph, shaped as below (found ${before_hops} in Before, ${after_hops} in After)"
+
+  # Bug-fix extras — only decidable when --title was inspectable above.
+  if [[ "$pr_title" =~ ^fix(\([^\)]+\))?!?: ]]; then
+    # "Mark the faulty hop" is literal: the marker has to sit on a hop line
+    # inside the Before graph. A `BUG:` loose in prose, or down in After, marks
+    # nothing. The arrow is deliberately not required — `←`, `<-` and a bare
+    # `BUG:` all read the same, and mandating one Unicode glyph is typing
+    # friction, not signal. The word boundary keeps `debug:` from qualifying.
+    marker_re='(^|[^[:alnum:]_])bug:'
+    # Same line, either order: `hop … ← BUG: why` or `← BUG: why … hop`.
+    marked_hop() {
+      grep -qE "${hop_re}.*${marker_re}" <<<"$before_graph" ||
+        grep -qE "${marker_re}.*${hop_re}" <<<"$before_graph"
+    }
+    marked_hop \
+      || missing+="
+  - fix: PR — '← BUG: <what goes wrong>' on a hop line inside the Before graph"
+    has_line '(fixes|closes|resolves)[[:space:]]+#[0-9]+' \
+      || missing+="
+  - fix: PR — an issue link, 'Fixes #<n>'"
+  fi
+
+  if [[ -n "$missing" ]]; then
+    deny "PR description is missing the mandated before/after call graph.
+
+Missing:${missing}
+
+Shape — one line per hop, only the hops this PR changes:
+  Before
+    exec_box            (BoxHandle · src/boxlite/src/portal/exec.rs:88)
+      └─ open_console   (Jailer · src/boxlite/src/jailer/console.rs:41)  ← BUG: returns before the socket binds
+  After
+    exec_box            (BoxHandle · src/boxlite/src/portal/exec.rs:88)
+      └─ open_console   (Jailer · src/boxlite/src/jailer/console.rs:41)  — awaits the bind future
+
+Read the real call sites before writing the graph — a graph with invented
+symbols or stale line numbers is worse than none.
+
+Rewrite the body and retry. Rule and full example: CONTRIBUTING.md
+#commit--pr-messages; section layout: .github/pull_request_template.md."
   fi
 fi
 
