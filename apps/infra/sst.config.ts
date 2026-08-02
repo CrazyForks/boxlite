@@ -18,6 +18,12 @@
 //   5. observability               10. runner (EC2 + nested KVM)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// The one stage that holds real user data. Both the `removal` policy and the
+// RDS deletion-protection/final-snapshot guards key off this exact name, so it
+// lives in one place rather than being spelled out at each use — a mismatch
+// between the two silently leaves the real stack unprotected.
+const PRODUCTION_STAGE = 'prod'
+
 // Container ports each service listens on internally
 const PORTS = {
   API: 3000,
@@ -87,7 +93,7 @@ export default $config({
 
     return {
       name: 'boxlite',
-      removal: input?.stage === 'production' ? 'retain' : 'remove',
+      removal: input?.stage === PRODUCTION_STAGE ? 'retain' : 'remove',
       home: 'aws',
       providers: {
         aws: {
@@ -224,11 +230,11 @@ export default $config({
     // Durable state survives accidental teardown the way the runner does (§10).
     // `removal: 'retain'` (above) already keeps prod resources on `sst remove`, but it
     // does NOT stop a targeted destroy, a replace-on-immutable-change, or an AWS-console
-    // delete — so production also gets RDS deletion-protection + a final snapshot.
+    // delete — so prod also gets RDS deletion-protection + a final snapshot.
     // S3 versioning is on in every stage: cheap, and the only guard against an
     // object-level overwrite/delete (which `removal` never covers). Redis is a
     // transient cache, so it needs neither.
-    const isProd = $app.stage === 'production'
+    const isProd = $app.stage === PRODUCTION_STAGE
     // Unique-but-stable suffix for the DB final snapshot: a fixed name would collide
     // with the snapshot a prior teardown of the same stage already created (RDS requires
     // unique final-snapshot ids). RandomId is stable across deploys (no drift) and is
@@ -472,9 +478,10 @@ export default $config({
         DEFAULT_TEMPLATE: envOr('DEFAULT_TEMPLATE', 'boxlite/base'),
         // Box base images: the three *_IMAGE refs below are the built-in curated set the API
         // gates box creation to (apps/api curated-images.constant.ts); the runner pulls them
-        // straight from ghcr.io with its GHCR_TOKEN. BOXLITE_SYSTEM_IMAGES appends more images
+        // straight from ghcr.io, and these three are public so no GHCR_TOKEN is required.
+        // BOXLITE_SYSTEM_IMAGES appends more images
         // (comma-separated `name=ref`) without a code deploy — empty means built-ins only.
-        // IMAGE_TAG and the SOURCE_REGISTRY_* block are inert Daytona-port residue (no consumer
+        // IMAGE_TAG and the SOURCE_REGISTRY_* block are inert upstream-port residue (no consumer
         // — see apps/api configuration.ts), kept only as reserved names for a future registry path.
         BOXLITE_SYSTEM_IMAGE_TAG: envOr('BOXLITE_SYSTEM_IMAGE_TAG', 'v0.1.0'),
         BOXLITE_SYSTEM_BASE_IMAGE: envOr(
@@ -881,13 +888,16 @@ export default $config({
     })
 
     // ── Runner ghcr pull credential (private image access) ────────────────────
-    // Runners pull box images straight from private ghcr.io (the self-hosted
-    // registry was removed). The pull TOKEN is stored in Secrets Manager and
-    // fetched by each runner at boot via its instance-role — NOT baked into
-    // user-data/IMDS — so scaled-out runners pick it up automatically and a
-    // rotated token only needs a secret update + a runner restart. The username
-    // (a non-secret bot account) is baked directly. Env-gated: set GHCR_TOKEN
-    // (+ GHCR_USERNAME) in apps/infra/.env to enable; unset = no ghcr auth wired.
+    // Runners pull box images straight from ghcr.io (the self-hosted registry
+    // was removed). The curated defaults (BOXLITE_SYSTEM_*_IMAGE, above) are
+    // public, so this credential is needed only for a private ref — whether set
+    // there or appended through BOXLITE_SYSTEM_IMAGES. When
+    // set, the pull TOKEN is stored in Secrets Manager and fetched by each
+    // runner at boot via its instance-role — NOT baked into user-data/IMDS — so
+    // scaled-out runners pick it up automatically and a rotated token only needs
+    // a secret update + a runner restart. The username (a non-secret bot
+    // account) is baked directly. Env-gated: set GHCR_TOKEN (+ GHCR_USERNAME)
+    // in apps/infra/.env to enable; unset = no ghcr auth wired.
     const ghcrUsername = process.env.GHCR_USERNAME?.trim() || ''
     const ghcrToken = process.env.GHCR_TOKEN?.trim() || ''
     const ghcrSecret =

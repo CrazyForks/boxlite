@@ -113,11 +113,42 @@ test('requires the OIDC client ID through the SST secret store', () => {
   assert.doesNotMatch(environmentExample, /^OIDC_CLIENT_ID=/m)
 
   const deploymentGuide = extractSection(readme, '## Deploy an existing stack', '## Secrets & credentials')
-  assert.match(deploymentGuide, /npm run sst -- secret set OIDC_CLIENT_ID/)
+  assert.match(deploymentGuide, /npm run bootstrap/)
+  assert.match(deploymentGuide, /OIDC_CLIENT_ID/)
   assert.doesNotMatch(deploymentGuide, /App secrets .* are optional/)
   for (const documentation of [readme, environmentExample]) {
     assert.doesNotMatch(documentation, /secret set (?:[A-Z_]+|<NAME>)\s+["']?<[^>\n]+>["']?\s+--stage/)
   }
+})
+
+test('data-protection guards key off the stage that actually exists: prod', () => {
+  // SST state has app/boxlite/prod.json and no production.json — the real
+  // stage is `prod`. The deployed prod stack carries retainOnDelete and
+  // deletionProtection because it was deployed from a branch that already
+  // compared against 'prod'; main still said 'production', so deploying prod
+  // from main would have computed isProd === false and reset them. One
+  // constant, both call sites, so the two guards cannot drift apart again.
+  assert.match(source, /const PRODUCTION_STAGE = 'prod'/)
+  assert.match(source, /removal: input\?\.stage === PRODUCTION_STAGE \? 'retain' : 'remove'/)
+  assert.match(source, /const isProd = \$app\.stage === PRODUCTION_STAGE/)
+})
+
+test('no stage-name comparison hardcodes a bare production literal', () => {
+  // NODE_ENV / ENVIRONMENT: 'production' are Node runtime values, not stages,
+  // and must survive; a stage comparison against the string must not.
+  //
+  // Match any comparison operator and any quote form. Pinning `stage ===
+  // 'production'` alone let the inverse, loose equality, and a template
+  // literal through — a guard could compare against the wrong stage name and
+  // this test would still pass, which is exactly what it exists to prevent.
+  assert.doesNotMatch(source, /\bstage\b\s*(?:===|!==|==|!=)\s*(?:'production'|"production"|`production`)/)
+  assert.doesNotMatch(source, /(?:'production'|"production"|`production`)\s*(?:===|!==|==|!=)\s*\bstage\b/)
+  assert.match(source, /NODE_ENV: 'production'/)
+})
+
+test('the prod stage keeps deletion protection and a final snapshot', () => {
+  assert.match(source, /args\.deletionProtection = isProd/)
+  assert.match(source, /args\.skipFinalSnapshot = !isProd/)
 })
 
 test('does not restore the removed SSH gateway deployment', () => {
