@@ -19,7 +19,7 @@
 # * Matcher scope: PreToolUse/PostToolUse matchers are tool-name-only, so this
 #   registers on the broad `Bash` matcher and does its own filtering, exiting 0
 #   immediately on unrelated commands. Same shape as
-#   .claude/hooks/preflight-commit-push.sh:55 and preflight-pr-review.sh:52 —
+#   .agents/hooks/preflight-commit-push.sh:55 and preflight-pr-review.sh:52 —
 #   segment-anchored so `echo "git push"` does not match, newline-normalized so
 #   a verb on line 2 does.
 #
@@ -120,7 +120,10 @@ When an event arrives:
   * a new comment or review    -> summarize it for the user; apply the same
     policy before acting on it.
   * send a PushNotification for a failing required check ('Lint (conclusion)',
-    'Test (conclusion)') or a new human review — not for routine passes.
+    'Test (conclusion)') AND for every new comment,
+    review, or inline review thread — bots included. Reviewers are why the
+    watch exists; an unread bot finding is the failure mode it is meant to
+    prevent. Routine passing checks stay silent.
 
 If the user asked you not to watch this one, skip the Monitor and say so."
 
