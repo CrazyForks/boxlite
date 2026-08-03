@@ -345,8 +345,8 @@ export interface JsNetworkHandle {
 
 /** Internal contract implemented by the native N-API tunnel binding. */
 export interface NativeBoxTunnel {
-  /** Return the public endpoint for this tunnel. */
-  endpoint(): string | number;
+  /** Public URL of a remotely served tunnel, or null for a local one. */
+  uri(): string | null;
   /** Consume the tunnel and return its bidirectional byte stream. */
   connect(): Promise<NativeBoxConnection>;
 }

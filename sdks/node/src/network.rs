@@ -2,15 +2,15 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use boxlite::LiteBox;
-use boxlite::litebox::{BoxEndpoint, BoxTunnel};
+use boxlite::litebox::BoxTunnel;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::util::map_err;
 
-type ConnectionReader = tokio::io::ReadHalf<Box<dyn boxlite::BoxConnection>>;
-type ConnectionWriter = tokio::io::WriteHalf<Box<dyn boxlite::BoxConnection>>;
+type ConnectionReader = boxlite::BoxReader;
+type ConnectionWriter = boxlite::BoxWriter;
 
 /// Handle for network operations on a box.
 #[napi]
@@ -54,8 +54,9 @@ impl JsNetworkHandle {
 
 #[napi]
 impl JsBoxTunnel {
+    /// Public URL of a remotely served tunnel, or `null` for a local one.
     #[napi]
-    pub fn endpoint(&self) -> Result<Either<String, i32>> {
+    pub fn uri(&self) -> Result<Option<String>> {
         let handle = self
             .handle
             .lock()
@@ -63,10 +64,7 @@ impl JsBoxTunnel {
         let tunnel = handle
             .as_ref()
             .ok_or_else(|| Error::from_reason("tunnel connection has already been consumed"))?;
-        match tunnel.endpoint() {
-            BoxEndpoint::Uri(uri) => Ok(Either::A(uri)),
-            BoxEndpoint::FileDescriptor(fd) => Ok(Either::B(fd)),
-        }
+        Ok(tunnel.uri().map(str::to_owned))
     }
 
     #[napi]
@@ -77,8 +75,7 @@ impl JsBoxTunnel {
             .map_err(|_| Error::from_reason("tunnel lock poisoned"))?
             .take()
             .ok_or_else(|| Error::from_reason("tunnel connection has already been consumed"))?;
-        let connection = tunnel.connect().map_err(map_err)?;
-        let (reader, writer) = tokio::io::split(connection);
+        let (reader, writer) = tunnel.connect().map_err(map_err)?.into_split();
         Ok(JsBoxConnection {
             reader: Arc::new(tokio::sync::Mutex::new(Some(reader))),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
@@ -123,10 +120,7 @@ impl JsBoxConnection {
     pub async fn close(&self) -> Result<()> {
         let mut writer = self.writer.lock().await;
         if let Some(mut stream) = writer.take() {
-            stream
-                .shutdown()
-                .await
-                .map_err(|error| Error::from_reason(format!("close tunnel connection: {error}")))?;
+            stream.shutdown().await.map_err(map_err)?;
         }
         self.reader.lock().await.take();
         Ok(())
@@ -136,10 +130,7 @@ impl JsBoxConnection {
     pub async fn shutdown_write(&self) -> Result<()> {
         let mut writer = self.writer.lock().await;
         if let Some(stream) = writer.as_mut() {
-            stream
-                .shutdown()
-                .await
-                .map_err(|error| Error::from_reason(format!("shut down tunnel writer: {error}")))?;
+            stream.shutdown().await.map_err(map_err)?;
         }
         Ok(())
     }

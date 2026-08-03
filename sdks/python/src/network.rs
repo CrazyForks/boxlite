@@ -2,15 +2,15 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use boxlite::LiteBox;
-use boxlite::litebox::{BoxEndpoint, BoxTunnel};
+use boxlite::litebox::BoxTunnel;
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::util::map_err;
 
-type ConnectionReader = tokio::io::ReadHalf<Box<dyn boxlite::BoxConnection>>;
-type ConnectionWriter = tokio::io::WriteHalf<Box<dyn boxlite::BoxConnection>>;
+type ConnectionReader = boxlite::BoxReader;
+type ConnectionWriter = boxlite::BoxWriter;
 
 /// Handle for network operations on a box.
 #[pyclass(name = "NetworkHandle")]
@@ -54,8 +54,9 @@ impl PyNetworkHandle {
 
 #[pymethods]
 impl PyBoxTunnel {
-    fn endpoint(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let endpoint = self
+    /// Public URL of a remotely served tunnel, or `None` for a local one.
+    fn uri(&self) -> PyResult<Option<String>> {
+        Ok(self
             .handle
             .lock()
             .map_err(|_| {
@@ -69,11 +70,8 @@ impl PyBoxTunnel {
                     "tunnel connection has already been consumed".into(),
                 ))
             })?
-            .endpoint();
-        match endpoint {
-            BoxEndpoint::Uri(uri) => Ok(uri.into_pyobject(py)?.into_any().unbind()),
-            BoxEndpoint::FileDescriptor(fd) => Ok(fd.into_pyobject(py)?.into_any().unbind()),
-        }
+            .uri()
+            .map(str::to_owned))
     }
 
     fn connect<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -92,8 +90,7 @@ impl PyBoxTunnel {
                         "tunnel connection has already been consumed".into(),
                     ))
                 })?;
-            let connection = tunnel.connect().map_err(map_err)?;
-            let (reader, writer) = tokio::io::split(connection);
+            let (reader, writer) = tunnel.connect().map_err(map_err)?.into_split();
             Ok(PyBoxConnection {
                 reader: Arc::new(tokio::sync::Mutex::new(Some(reader))),
                 writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
@@ -153,11 +150,7 @@ impl PyBoxConnection {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut writer = writer.lock().await;
             if let Some(mut stream) = writer.take() {
-                stream.shutdown().await.map_err(|error| {
-                    map_err(boxlite::BoxliteError::Network(format!(
-                        "close tunnel connection: {error}"
-                    )))
-                })?;
+                stream.shutdown().await.map_err(map_err)?;
             }
             reader.lock().await.take();
             Ok(())
@@ -169,11 +162,7 @@ impl PyBoxConnection {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut writer = writer.lock().await;
             if let Some(stream) = writer.as_mut() {
-                stream.shutdown().await.map_err(|error| {
-                    map_err(boxlite::BoxliteError::Network(format!(
-                        "shut down tunnel writer: {error}"
-                    )))
-                })?;
+                stream.shutdown().await.map_err(map_err)?;
             }
             Ok(())
         })
