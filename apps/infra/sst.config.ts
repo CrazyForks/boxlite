@@ -354,17 +354,23 @@ export default $config({
     // Created before Api so API, runner, host, and box can all emit OTLP to the
     // same Collector. ClickHouse is external/managed only; no in-cluster
     // ClickHouseSpike fallback is part of the target architecture.
-    // Internal ALB by default: the trace UI exposes every span (URLs, headers,
-    // IDs, SQL, error bodies) with no auth, and nothing outside the VPC needs
-    // to read it. Reach it via VPN / bastion / `aws ssm start-session`.
-    // JAEGER_PUBLIC=true opts into an internet-facing ALB — which then also
-    // exposes the unauthenticated OTLP ingest listener below.
-    const jaegerPublic = envOr('JAEGER_PUBLIC', 'false') === 'true'
+    // Jaeger is VPC-internal only: the trace UI exposes every span (URLs,
+    // headers, IDs, SQL, error bodies) with no auth over plain HTTP, and its
+    // OTLP ingest is equally unauthenticated — reach the UI via VPN / bastion /
+    // `aws ssm start-session`. JAEGER_PUBLIC is rejected (fail loud) like
+    // MAILDEV_PUBLIC: no auth gate or TLS story makes public exposure safe.
+    if (envOr('JAEGER_PUBLIC', 'false') === 'true') {
+      throw new Error(
+        'JAEGER_PUBLIC is not supported: Jaeger has no auth and its UI is plain HTTP, so ' +
+          'it cannot be safely exposed to the internet. Reach it via VPN / bastion / ' +
+          '`aws ssm start-session`.',
+      )
+    }
     const jaeger = new sst.aws.Service('Jaeger', {
       cluster,
       image: IMAGES.jaeger,
       loadBalancer: {
-        public: jaegerPublic,
+        public: false,
         rules: [
           { listen: '80/http', forward: `${PORTS.JAEGER_UI}/http` },
           // OTLP HTTP ingest, fed by the OtelCollector's otlphttp/jaeger exporter.
