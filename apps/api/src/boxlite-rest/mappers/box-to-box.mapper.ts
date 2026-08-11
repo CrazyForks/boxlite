@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
+import { BadRequestException } from '@nestjs/common'
 import { BoxDto } from '../../box/dto/box.dto'
 import { BoxState } from '../../box/enums/box-state.enum'
 import {
@@ -45,12 +46,30 @@ export function createBoxToCreateBox(dto: RestCreateBoxDto, target?: string): Cr
   createDto.autoStop = dto.auto_stop
   createDto.autoDelete = dto.auto_delete
   createDto.autoResume = dto.auto_resume
+  createDto.volumes = dto.volumes?.map((volume) => ({
+    volumeId: resolveVolumeId(volume),
+    mountPath: volume.guest_path,
+  }))
   if (dto.network) {
     const allowNet = dto.network.allow_net?.map((entry) => entry.trim()).filter(Boolean)
     createDto.networkBlockAll = dto.network.mode === 'disabled'
     createDto.networkAllowList = dto.network.mode === 'enabled' && allowNet?.length ? allowNet.join(',') : undefined
   }
   return createDto
+}
+
+function resolveVolumeId(volume: NonNullable<RestCreateBoxDto['volumes']>[number]): string {
+  // `host_path` is the deprecated pre-managed-volumes field name; DTO
+  // validation (HasVolumeSourceConstraint) already guarantees one of the two
+  // is present.
+  const source = volume.source ?? volume.host_path
+  if (source?.startsWith('volume://')) {
+    const volumeId = source.slice('volume://'.length)
+    if (volumeId) {
+      return volumeId
+    }
+  }
+  throw new BadRequestException('volume source must use the volume:// scheme')
 }
 
 function mapState(state: string | BoxState | undefined): string {
